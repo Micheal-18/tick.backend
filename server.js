@@ -10,7 +10,7 @@ import QRCode from "qrcode";
 
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: "http://localhost:5173" })); // allow Vite frontend
+app.use(cors({ origin: "*" })); // allow Vite frontend
 
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -25,7 +25,7 @@ app.get("/", (req, res) => {
 
 app.post("/api/purchase", async (req, res) => {
   try {
-    const { reference, email, eventId, ticketType} = req.body;
+    const { reference, email, eventId, ticketType } = req.body;
     console.log(req.body, "===>>>> body");
 
     console.log(reference)
@@ -59,13 +59,13 @@ app.post("/api/purchase", async (req, res) => {
     console.log("Event updated");
 
     // Save ticket in Firestore
-    
+
     const ticketRef = db.collection("tickets").doc();
     await ticketRef.set({
       email,
       eventId,
       reference,
-      ticketType,  
+      ticketType,
       amount: verifyData.data.amount / 100, // Paystack returns amount in kobo
       status: verifyData.data.status,
       used: false,
@@ -104,19 +104,20 @@ app.post("/api/purchase", async (req, res) => {
     // (Optional) Send email here using nodemailer
     // Uncomment and configure correctly if needed
     const transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp-relay.brevo.com",
+      port: 465,
+      secure: true, // use true for port 465
       auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-      tls: {
-        rejectUnauthorized: false, // fixes some Gmail quirks
+        user: process.env.BREVO_USER,
+        pass: process.env.BREVO_SMTP_KEY,
       },
     });
 
 
+
+
     await transporter.sendMail({
-      from: `"Airticks Event" <${process.env.EMAIL_USER}>`,
+      from: `"Airticks Event" <${process.env.EMAIL_FROM}>`,
       to: email,
       subject: "Your Ticket Confirmation",
       html: htmlTemplate,
@@ -130,6 +131,9 @@ app.post("/api/purchase", async (req, res) => {
       ],
     });
 
+    console.log("Email sent", transporter);
+
+
     res.json({
       success: true, ticketId: ticketRef.id, reference,
       eventId,
@@ -142,4 +146,8 @@ app.post("/api/purchase", async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log("✅ Backend running at http://localhost:3000"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
+
+
+// app.listen(3000, () => console.log("✅ Backend running at http://localhost:3000"));
