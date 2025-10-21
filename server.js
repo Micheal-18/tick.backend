@@ -25,7 +25,7 @@ app.get("/", (req, res) => {
 
 app.post("/api/purchase", async (req, res) => {
   try {
-    const { reference, email, eventId, ticketType } = req.body;
+    const { reference, email, eventId, ticketType, ticketNumber } = req.body;
     console.log(req.body, "===>>>> body");
 
     console.log(reference)
@@ -66,6 +66,7 @@ app.post("/api/purchase", async (req, res) => {
       eventId,
       reference,
       ticketType,
+      ticketNumber,
       amount: verifyData.data.amount / 100, // Paystack returns amount in kobo
       status: verifyData.data.status,
       used: false,
@@ -86,6 +87,7 @@ app.post("/api/purchase", async (req, res) => {
     <table style="width:100%; border-collapse:collapse; margin:20px 0;">
       <tr><td><b>Event ID:</b></td><td>${eventId}</td></tr>
       <tr><td><b>Reference:</b></td><td>${reference}</td></tr>
+      <tr><td><b>TicketNumber:</b></td><td>${ticketNumber}</td></tr>
       <tr><td><b>Amount:</b></td><td>₦${verifyData.data.amount / 100}</td></tr>
       <tr><td><b>Status:</b></td><td style="color:green;">${verifyData.data.status}</td></tr>
     </table>
