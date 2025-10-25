@@ -53,8 +53,8 @@ app.post("/api/purchase", async (req, res) => {
 
     const eventRef = db.collection("events").doc(eventId);
     await eventRef.update({
-      ticketsSold: admin.firestore.FieldValue.increment(1),
-      revenue: admin.firestore.FieldValue.increment(verifyData.data.amount / 100),
+      ticketSold: admin.firestore.FieldValue.increment(ticketNumber),
+      revenue: admin.firestore.FieldValue.increment(verifyData.data.amount * ticketNumber / 100),
     });
     console.log("Event updated");
 
@@ -107,8 +107,8 @@ app.post("/api/purchase", async (req, res) => {
     // Uncomment and configure correctly if needed
     const transporter = nodemailer.createTransport({
       host: "smtp-relay.brevo.com",
-      port: 465,
-      secure: true, // use true for port 465
+       port: 587,
+       secure: false, // use TLS (not SSL)
       auth: {
         user: process.env.BREVO_USER,
         pass: process.env.BREVO_SMTP_KEY,
