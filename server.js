@@ -5,134 +5,413 @@ import fetch from "node-fetch";
 import admin from "firebase-admin";
 import cors from "cors";
 import QRCode from "qrcode";
-import Brevo from "@getbrevo/brevo"; // ✅ Brevo SDK
+import Brevo from "@getbrevo/brevo";
+import crypto from "crypto";
+import nodemailer from "nodemailer";
 
 const app = express();
-app.use(express.json());
-app.use(cors({ origin: "*" }));
+app.use(cors());
 
-// ✅ Firebase Admin
+// Use raw body for webhook, JSON for other routes
+app.use("/api/webhook/paystack", express.raw({ type: "application/json" }));
+app.use(express.json());
+
+/* =======================
+   FIREBASE ADMIN
+======================= */
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 }
 const db = admin.firestore();
 
-// ✅ Brevo Setup
-const apiInstance = new Brevo.TransactionalEmailsApi();
-apiInstance.authentications["apiKey"].apiKey = process.env.BREVO_API_KEY;
+/* =======================
+   BREVO EMAIL SETUP
+======================= */
+const emailApi = new Brevo.TransactionalEmailsApi();
+emailApi.authentications["apiKey"].apiKey = process.env.BREVO_API_KEY;
 
-// ✅ Test route
-app.get("/", (req, res) => res.send("🚀 Airticks backend is running!"));
+/* =======================
+   TEST ROUTE
+======================= */
+app.get("/", (req, res) => res.send("🚀 Airticks backend running"));
 
-// ✅ Purchase route
-app.post("/api/purchase", async (req, res) => {
+/* =======================
+   CREATE PAYSTACK SUBACCOUNT
+======================= */
+app.post("/api/create-subaccount", async (req, res) => {
   try {
-    const { reference, email, eventId, ticketType, ticketNumber } = req.body;
-    console.log("Request body ===>>>", req.body);
+    const {
+      business_name,
+      account_number,
+      bank_code,
+      percentage_charge,
+      primary_contact_email,
+    } = req.body;
 
-    // ✅ Verify payment with Paystack
-    const verifyRes = await fetch(
-      `https://api.paystack.co/transaction/verify/${reference}`,
+    if (!business_name || !account_number || !bank_code) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const response = await fetch("https://api.paystack.co/subaccount", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        business_name,
+        settlement_bank: bank_code,
+        account_number,
+        percentage_charge: percentage_charge || 0,
+        primary_contact_email,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!data.status) {
+      return res.status(400).json({ error: data.message });
+    }
+
+    res.json({
+      subaccount_code: data.data.subaccount_code,
+    });
+  } catch (err) {
+    console.error("SUBACCOUNT ERROR:", err);
+    res.status(500).json({ error: "Failed to create subaccount" });
+  }
+});
+
+
+/* =======================
+   INIT PAYMENT
+======================= */
+app.post("/api/init-payment", async (req, res) => {
+  try {
+    /* ===============================
+       1. READ & VALIDATE INPUT
+    =============================== */
+    const { name, email, eventId, ticketLabel, ticketNumber } = req.body;
+
+    if (!email || !eventId || !ticketLabel) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const qty = Number(ticketNumber);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      return res.status(400).json({ error: "Invalid ticket quantity" });
+    }
+
+    /* ===============================
+       2. FETCH EVENT
+    =============================== */
+    const eventSnap = await db.collection("events").doc(eventId).get();
+    if (!eventSnap.exists) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const event = eventSnap.data();
+
+    if (!event.subaccountCode) {
+      return res.status(400).json({ error: "Organizer payout not configured" });
+    }
+
+    /* ===============================
+       3. FIND TICKET
+    =============================== */
+    const ticket = event.price?.find(t => t.label === ticketLabel);
+    if (!ticket) {
+      return res.status(400).json({ error: "Ticket not found" });
+    }
+
+    const ticketPrice = Number(ticket.amount);
+    if (isNaN(ticketPrice) || ticketPrice <= 0) {
+      return res.status(400).json({ error: "Invalid ticket price" });
+    }
+
+    console.log("🧾 Incoming payload:", req.body);
+console.log("🎟 Event price array:", event.price);
+console.log("🎫 Selected ticket:", ticket);
+console.log("🔢 Ticket amount raw:", ticket.amount);
+console.log("🔢 Ticket qty raw:", qty);
+
+
+    /* ===============================
+       4. CALCULATE AMOUNT
+    =============================== */
+    const totalAmount = ticketPrice * qty;
+    const amountInKobo = Math.round(totalAmount * 100);
+
+    if (amountInKobo < 100) {
+      return res.status(400).json({ error: "Amount too low for Paystack" });
+    }
+
+    /* ===============================
+       5. INIT PAYSTACK
+       (NO ADMIN FEE FOR NOW)
+    =============================== */
+    
+    const paystackRes = await fetch(
+      "https://api.paystack.co/transaction/initialize",
       {
-        method: "GET",
+        method: "POST",
         headers: {
           Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
           "Content-Type": "application/json",
         },
+        body: JSON.stringify({
+          email,
+          amount: amountInKobo,
+          subaccount: event.subaccountCode,
+          metadata: {
+            eventId,
+            ticketLabel,
+            ticketNumber: qty,
+            platform: "airticks",
+            fullName: name,
+          },
+        }),
       }
     );
 
-    const verifyData = await verifyRes.json();
-    console.log("Paystack verify ===>>>", verifyData);
+    const data = await paystackRes.json();
 
-    if (!verifyData.status || verifyData.data.status !== "success") {
-      return res.status(400).json({ error: "Payment not verified" });
+    if (!data.status) {
+      console.error("❌ Paystack error:", data);
+      return res.status(400).json({ error: data.message });
     }
 
-    // ✅ Update event in Firestore
-    const eventRef = db.collection("events").doc(eventId);
-    await eventRef.update({
-      ticketSold: admin.firestore.FieldValue.increment(ticketNumber),
-      revenue: admin.firestore.FieldValue.increment(
-        (verifyData.data.amount * ticketNumber) / 100
-      ),
+    /* ===============================
+       6. SUCCESS RESPONSE
+    =============================== */
+    return res.json({
+      authorization_url: data.data.authorization_url,
+      reference: data.data.reference,
+      amount: totalAmount, // naira (for frontend)
     });
-    console.log("✅ Event updated");
 
-    // ✅ Save ticket in Firestore
+  } catch (err) {
+    console.error("INIT PAYMENT ERROR:", err);
+    return res.status(500).json({ error: "Payment init failed" });
+  }
+});
+
+
+/* =======================
+   PAYSTACK WEBHOOK (Refactored)
+======================= */
+app.post("/api/webhook/paystack", async (req, res) => {
+  try {
+    /* =========================
+       VERIFY PAYSTACK SIGNATURE
+    ========================== */
+    const hash = crypto
+      .createHmac("sha512", process.env.PAYSTACK_SECRET_KEY)
+      .update(req.body)
+      .digest("hex");
+
+    if (hash !== req.headers["x-paystack-signature"]) {
+      return res.status(401).send("Invalid signature");
+    }
+
+    const payload = JSON.parse(req.body.toString());
+
+    if (payload.event !== "charge.success") {
+      console.log("ℹ️ Ignored event:", payload.event);
+      return res.sendStatus(200);
+    }
+
+    const { reference, metadata, customer, amount } = payload.data;
+    const paidAmount = amount / 100; // naira
+
+    console.log("Webhook metadata:", metadata);
+
+
+    /* =========================
+       PREVENT DUPLICATES
+    ========================== */
+    const existing = await db
+      .collection("tickets")
+      .where("reference", "==", reference)
+      .limit(1)
+      .get();
+
+    if (!existing.empty) return res.sendStatus(200);
+
+    /* =========================
+       FETCH EVENT
+    ========================== */
+    const eventSnap = await db.collection("events").doc(metadata.eventId).get();
+    if (!eventSnap.exists) return res.sendStatus(200);
+
+    if (!metadata || !metadata.eventId) {
+  console.error("❌ Missing metadata.eventId", metadata);
+  return res.sendStatus(200); // never crash webhook
+}
+
+
+    const eventDoc = eventSnap.data();
+    const organizerId = eventDoc.ownerId;
+
+    /* =========================
+       WALLET SPLIT LOGIC
+    ========================== */
+    const PLATFORM_FEE_PERCENT = 8;
+
+    const platformFee = Math.round(
+      (paidAmount * PLATFORM_FEE_PERCENT) / 100
+    );
+    const organizerAmount = paidAmount - platformFee;
+
+    /* =========================
+       FIRESTORE TRANSACTION
+    ========================== */
+    const platformWalletRef = db.collection("wallets").doc("platform");
+    const organizerWalletRef = db
+      .collection("wallets")
+      .doc("organizers")
+      .collection("users")
+      .doc(organizerId);
+
     const ticketRef = db.collection("tickets").doc();
-    await ticketRef.set({
-      email,
-      eventId,
+
+    await db.runTransaction(async (tx) => {
+      const platformSnap = await tx.get(platformWalletRef);
+      const organizerSnap = await tx.get(organizerWalletRef);
+
+      // Platform wallet
+      tx.set(
+        platformWalletRef,
+        {
+          balance: (platformSnap.data()?.balance || 0) + platformFee,
+          totalEarned:
+            (platformSnap.data()?.totalEarned || 0) + platformFee,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      // Organizer wallet
+      tx.set(
+        organizerWalletRef,
+        {
+          balance:
+            (organizerSnap.data()?.balance || 0) + organizerAmount,
+          totalEarned:
+            (organizerSnap.data()?.totalEarned || 0) + organizerAmount,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      // Ticket
+      tx.set(ticketRef, {
+        reference,
+        eventId: metadata.eventId,
+        eventName: eventDoc.name,
+        ticketNumber: metadata.ticketNumber,
+        amount: paidAmount,
+        status: "success",
+        used: false,
+        email: customer.email,
+        buyerName: metadata.fullName || customer.name || "Guest",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    /* =========================
+       QR CODE
+    ========================== */
+    const qrData = await QRCode.toDataURL(ticketRef.id);
+    const qrBase64 = qrData.split(",")[1];
+    await ticketRef.update({ qr: qrBase64 });
+
+    /* =========================
+       LEDGER (AUDIT LOG)
+    ========================== */
+    await db.collection("wallet_transactions").add({
       reference,
-      ticketType,
-      ticketNumber,
-      amount: verifyData.data.amount / 100,
-      status: verifyData.data.status,
-      used: false,
+      eventId: metadata.eventId,
+      organizerId,
+      grossAmount: paidAmount,
+      platformFee,
+      organizerAmount,
+      type: "ticket_sale",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // ✅ Generate QR code
-    const qrCodeData = await QRCode.toDataURL(ticketRef.id);
-    const qrBase64 = qrCodeData.split(",")[1];
+    res.sendStatus(200);
 
-    // ✅ Email template
-    const htmlTemplate = `
-      <div style="font-family: Arial, sans-serif; line-height:1.6; max-width:600px; margin:auto; border:1px solid #ddd; border-radius:12px; padding:20px;">
-        <h2 style="color:#2C3E50; text-align:center;">🎫 Your Ticket is Confirmed!</h2>
-        <p>Hello,</p>
-        <p>Thank you for purchasing a ticket with <b>Airticks Event</b>. Below are your ticket details:</p>
-        
-        <table style="width:100%; border-collapse:collapse; margin:20px 0;">
-          <tr><td><b>Event ID:</b></td><td>${eventId}</td></tr>
-          <tr><td><b>Reference:</b></td><td>${reference}</td></tr>
-          <tr><td><b>TicketNumber:</b></td><td>${ticketNumber}</td></tr>
-          <tr><td><b>Amount:</b></td><td>₦${verifyData.data.amount / 100}</td></tr>
-          <tr><td><b>Status:</b></td><td style="color:green;">${verifyData.data.status}</td></tr>
+    /* =========================
+       EMAIL (ASYNC)
+    ========================== */
+
+    console.log("sending mail");
+    console.log(customer);
+    
+    
+    /* =========================
+   EMAIL VIA BREVO API
+========================= */
+setImmediate(async () => {
+  try {
+    const email = new Brevo.SendSmtpEmail();
+
+    email.subject = "🎫 Your Ticket Confirmation";
+    email.sender = {
+      name: "Airticks Event",
+      email: process.env.EMAIL_FROM,
+    };
+
+    email.to = [
+      {
+        email: customer.email,
+        name: metadata.fullName || "Guest",
+      },
+    ];
+
+    email.htmlContent = `
+      <div style="font-family: Arial, sans-serif; max-width:600px; margin:auto; padding:20px; border:1px solid #eee; border-radius:12px;">
+        <h2 style="text-align:center;">🎉 Ticket Confirmed!</h2>
+        <p>Hello ${metadata.fullName || "Guest"},</p>
+
+        <p>Your ticket for <b>${eventDoc.name}</b> has been successfully confirmed.</p>
+
+        <table style="width:100%; margin:16px 0;">
+          <tr><td><b>Reference</b></td><td>${reference}</td></tr>
+          <tr><td><b>Tickets</b></td><td>${metadata.ticketNumber}</td></tr>
+          <tr><td><b>Amount</b></td><td>₦${paidAmount}</td></tr>
+          <tr><td><b>Status</b></td><td style="color:green;">SUCCESS</td></tr>
         </table>
 
-       <p style="text-align:center;">Your ticket QR code is attached below 📎</p>
+        <p style="text-align:center;">
+          <img src="data:image/png;base64,${qrBase64}" width="200" />
+        </p>
 
-        <p style="font-size:12px; color:#555; text-align:center; margin-top:30px;">
-          Scan the QR code at the event entrance to validate your ticket. <br>
-          If you did not make this purchase, please contact support immediately.
+        <p style="font-size:12px; color:#777; text-align:center;">
+          Scan this QR code at the event entrance.
         </p>
       </div>
     `;
 
-    // ✅ Send Email via Brevo API
-    const sendSmtpEmail = new Brevo.SendSmtpEmail();
-    sendSmtpEmail.subject = "🎟 Your Airticks Ticket Confirmation";
-    sendSmtpEmail.sender = { name: "Airticks Event", email: process.env.EMAIL_FROM };
-    sendSmtpEmail.to = [{ email }];
-    sendSmtpEmail.htmlContent = htmlTemplate;
-    sendSmtpEmail.attachment = [
-      {
-        name: "ticket-qr.png",
-        content: qrBase64,
-        type: "image/png",
-      },
-    ];
+    await emailApi.sendTransacEmail(email);
+    console.log("📧 Email sent to", customer.email, metadata.fullName);
 
-    await apiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log("✅ Email sent successfully via Brevo API");
-
-    // ✅ Response
-    res.json({
-      success: true,
-      ticketId: ticketRef.id,
-      reference,
-      eventId,
-      amount: verifyData.data.amount / 100,
-      status: verifyData.data.status,
-    });
   } catch (err) {
-    console.error("❌ API error:", err);
-    res.status(500).json({ error: "Server error", details: err.message });
+    console.error("❌ Brevo email error:", err?.response?.body || err);
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Airticks backend running on port ${PORT}`));
+  } catch (err) {
+    console.error("WEBHOOK ERROR:", err);
+    res.sendStatus(500);
+  }
+});
+
+
+/* =======================
+   SERVER START
+======================= */
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
