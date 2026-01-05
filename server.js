@@ -271,11 +271,7 @@ app.post("/api/webhook/paystack", async (req, res) => {
        FIRESTORE TRANSACTION
     ========================== */
     const platformWalletRef = db.collection("wallets").doc("platform");
-    const organizerWalletRef = db
-      .collection("wallets")
-      .doc("organizers")
-      .collection("users")
-      .doc(organizerId);
+   const organizerWalletRef = db.collection("wallets").doc(organizerId);
 
     const ticketRef = db.collection("tickets").doc();
 
@@ -346,6 +342,8 @@ app.post("/api/webhook/paystack", async (req, res) => {
     await db.collection("wallet_transactions").add({
       reference,
       eventId: metadata.eventId,
+      eventName: eventDoc.name,
+      orgName: eventDoc.orgName,
       organizerId,
       grossAmount: paidAmount,
       platformFee,
