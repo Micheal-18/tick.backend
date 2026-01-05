@@ -254,6 +254,9 @@ app.post("/api/webhook/paystack", async (req, res) => {
     const eventDoc = eventSnap.data();
     const organizerId = eventDoc.ownerId;
 
+
+
+
     /* =========================
        WALLET SPLIT LOGIC
     ========================== */
@@ -301,6 +304,16 @@ app.post("/api/webhook/paystack", async (req, res) => {
           totalEarned:
             (organizerSnap.data()?.totalEarned || 0) + organizerAmount,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+        // Update event: ticketSold & revenue
+      tx.set(
+        eventRef,
+        {
+          ticketSold: (eventDoc.ticketSold || 0) + metadata.ticketNumber,
+          revenue: (eventDoc.revenue || 0) + paidAmount,
         },
         { merge: true }
       );
