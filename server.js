@@ -305,7 +305,7 @@ const eventRef = db.collection("events").doc(metadata.eventId);
         eventRef,
         {
           ticketSold: (eventDoc.ticketSold || 0) + metadata.ticketNumber,
-          revenue: (eventDoc.revenue || 0) + paidAmount,
+          revenue: (eventDoc.revenue || 0) + organizerAmount,
         },
         { merge: true }
       );
