@@ -7,7 +7,6 @@ import cors from "cors";
 import QRCode from "qrcode";
 import Brevo from "@getbrevo/brevo";
 import crypto from "crypto";
-import nodemailer from "nodemailer";
 
 const app = express();
 app.use(cors());
@@ -131,10 +130,10 @@ app.post("/api/init-payment", async (req, res) => {
     }
 
     console.log("🧾 Incoming payload:", req.body);
-console.log("🎟 Event price array:", event.price);
-console.log("🎫 Selected ticket:", ticket);
-console.log("🔢 Ticket amount raw:", ticket.amount);
-console.log("🔢 Ticket qty raw:", qty);
+    console.log("🎟 Event price array:", event.price);
+    console.log("🎫 Selected ticket:", ticket);
+    console.log("🔢 Ticket amount raw:", ticket.amount);
+    console.log("🔢 Ticket qty raw:", qty);
 
 
     /* ===============================
@@ -151,7 +150,7 @@ console.log("🔢 Ticket qty raw:", qty);
        5. INIT PAYSTACK
        (NO ADMIN FEE FOR NOW)
     =============================== */
-    
+
     const paystackRes = await fetch(
       "https://api.paystack.co/transaction/initialize",
       {
@@ -164,6 +163,7 @@ console.log("🔢 Ticket qty raw:", qty);
           email,
           amount: amountInKobo,
           subaccount: event.subaccountCode,
+          transaction_charge: Math.round(amountInKobo * 0.08),
           metadata: {
             eventId,
             ticketLabel,
@@ -217,219 +217,213 @@ app.post("/api/webhook/paystack", async (req, res) => {
 
     const payload = JSON.parse(req.body.toString());
 
-    if (payload.event !== "charge.success") {
-      console.log("ℹ️ Ignored event:", payload.event);
-      return res.sendStatus(200);
-    }
-
-    const { reference, metadata, customer, amount } = payload.data;
-    const paidAmount = amount / 100; // naira
-
-    console.log("Webhook metadata:", metadata);
-
-
     /* =========================
-       PREVENT DUPLICATES
+       CHARGE SUCCESS
     ========================== */
-    const existing = await db
-      .collection("tickets")
-      .where("reference", "==", reference)
-      .limit(1)
-      .get();
+    if (payload.event === "charge.success") {
+      const {
+        reference,
+        metadata,
+        customer,
+        amount,
+        fees,
+      } = payload.data;
 
-    if (!existing.empty) return res.sendStatus(200);
+      if (!metadata?.eventId) {
+        console.error("❌ Missing metadata.eventId");
+        return res.sendStatus(200);
+      }
 
-    /* =========================
-       FETCH EVENT
-    ========================== */
-    const eventSnap = await db.collection("events").doc(metadata.eventId).get();
-    if (!eventSnap.exists) return res.sendStatus(200);
+      const paidAmount = amount / 100;
+      const platformFee = Number((paidAmount * 0.08).toFixed(2));
+      const organizerAmount = paidAmount - platformFee;
 
-    if (!metadata || !metadata.eventId) {
-  console.error("❌ Missing metadata.eventId", metadata);
-  return res.sendStatus(200); // never crash webhook
-}
-    const eventDoc = eventSnap.data();
-    const organizerId = eventDoc.ownerId;
-    /* =========================
-       WALLET SPLIT LOGIC
-    ========================== */
-    const PLATFORM_FEE_PERCENT = 8;
 
-    const platformFee = Math.round(
-      (paidAmount * PLATFORM_FEE_PERCENT) / 100
-    );
-    const organizerAmount = paidAmount - platformFee;
+      /* =========================
+         PREVENT DUPLICATES
+      ========================== */
+      const existing = await db
+        .collection("tickets")
+        .where("reference", "==", reference)
+        .limit(1)
+        .get();
 
-    /* =========================
-       FIRESTORE TRANSACTION
-    ========================== */
-    const platformWalletRef = db.collection("wallets").doc("platform");
-   const organizerWalletRef = db.collection("wallets").doc(organizerId);
+      if (!existing.empty) return res.sendStatus(200);
 
-    const ticketRef = db.collection("tickets").doc();
+      /* =========================
+         FETCH EVENT
+      ========================== */
+      const eventRef = db.collection("events").doc(metadata.eventId);
+      const eventSnap = await eventRef.get();
+      if (!eventSnap.exists) return res.sendStatus(200);
 
-    await db.runTransaction(async (tx) => {
-      const platformSnap = await tx.get(platformWalletRef);
-      const organizerSnap = await tx.get(organizerWalletRef);
+      const eventDoc = eventSnap.data();
+      const organizerId = eventDoc.ownerId;
 
-      // Platform wallet
-      tx.set(
-        platformWalletRef,
-        {
-          balance: (platformSnap.data()?.balance || 0) + platformFee,
-          totalEarned:
-            (platformSnap.data()?.totalEarned || 0) + platformFee,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
+      const platformWalletRef = db.collection("wallets").doc("platform");
+      const organizerWalletRef = db.collection("wallets").doc(organizerId);
+      const ticketRef = db.collection("tickets").doc();
 
-      // Organizer wallet
-      tx.set(
-        organizerWalletRef,
-        {
-          balance:
-            (organizerSnap.data()?.balance || 0) + organizerAmount,
-          totalEarned:
-            (organizerSnap.data()?.totalEarned || 0) + organizerAmount,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
+      /* =========================
+         FIRESTORE TRANSACTION
+      ========================== */
+      await db.runTransaction(async (tx) => {
+        const platformSnap = await tx.get(platformWalletRef);
+        const organizerSnap = await tx.get(organizerWalletRef);
 
-        // Update event: ticketSold & revenue
-const eventRef = db.collection("events").doc(metadata.eventId);
-        
-      tx.set(
-        eventRef,
-        {
-          ticketSold: (eventDoc.ticketSold || 0) + metadata.ticketNumber,
-          revenue: (eventDoc.revenue || 0) + organizerAmount,
-        },
-        { merge: true }
-      );
+        // Platform wallet
+        tx.set(
+          platformWalletRef,
+          {
+            balance: (platformSnap.data()?.balance || 0) + platformFee,
+            totalEarned:
+              (platformSnap.data()?.totalEarned || 0) + platformFee,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
 
-      // Ticket
-      tx.set(ticketRef, {
+        // Organizer wallet
+        tx.set(
+          organizerWalletRef,
+          {
+            balance:
+              (organizerSnap.data()?.balance || 0) + organizerAmount,
+            totalEarned:
+              (organizerSnap.data()?.totalEarned || 0) + organizerAmount,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        // Event stats
+        tx.set(
+          eventRef,
+          {
+            ticketSold: (eventDoc.ticketSold || 0) + metadata.ticketNumber,
+            revenue: (eventDoc.revenue || 0) + paidAmount,
+          },
+          { merge: true }
+        );
+
+        // Ticket
+        tx.set(ticketRef, {
+          reference,
+          eventId: metadata.eventId,
+          eventName: eventDoc.name,
+          ticketNumber: metadata.ticketNumber,
+          amount: paidAmount,
+          status: "success",
+          used: false,
+          email: customer.email,
+          buyerName: metadata.fullName || customer.name || "Guest",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+
+      /* =========================
+         QR CODE
+      ========================== */
+      const qrData = await QRCode.toDataURL(ticketRef.id);
+      const qrBase64 = qrData.split(",")[1];
+      await ticketRef.update({ qr: qrBase64 });
+
+      /* =========================
+         WALLET LEDGER
+      ========================== */
+      await db.collection("wallet_transactions").add({
         reference,
         eventId: metadata.eventId,
         eventName: eventDoc.name,
-        ticketNumber: metadata.ticketNumber,
-        amount: paidAmount,
-        status: "success",
-        used: false,
-        email: customer.email,
-        buyerName: metadata.fullName || customer.name || "Guest",
+        organizerId,
+        grossAmount: paidAmount,
+        platformFee,
+        organizerAmount,
+        type: "ticket_sale",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
-    });
+
+      /* =========================
+         EMAIL (NON-BLOCKING)
+      ========================== */
+      setImmediate(async () => {
+        try {
+          const email = new Brevo.SendSmtpEmail();
+
+          email.subject = "🎫 Your Ticket Confirmation";
+          email.sender = {
+            name: "Airticks Event",
+            email: process.env.EMAIL_FROM,
+          };
+
+          email.to = [
+            {
+              email: customer.email,
+              name: metadata.fullName || "Guest",
+            },
+          ];
+
+          email.htmlContent = `
+            <div style="font-family: Arial, sans-serif; max-width:600px; margin:auto; padding:20px; border:1px solid #eee; border-radius:12px;">
+              <h2 style="text-align:center;">🎉 Ticket Confirmed!</h2>
+              <p>Hello ${metadata.fullName || "Guest"},</p>
+
+              <p>Your ticket for <b>${eventDoc.name}</b> has been successfully confirmed.</p>
+
+              <table style="width:100%; margin:16px 0;">
+                <tr><td><b>Reference</b></td><td>${reference}</td></tr>
+                <tr><td><b>Tickets</b></td><td>${metadata.ticketNumber}</td></tr>
+                <tr><td><b>Amount</b></td><td>₦${paidAmount}</td></tr>
+                <tr><td><b>Status</b></td><td style="color:green;">SUCCESS</td></tr>
+              </table>
+
+              <p style="text-align:center;">
+                <img src="data:image/png;base64,${qrBase64}" width="200" />
+              </p>
+
+              <p style="font-size:12px; color:#777; text-align:center;">
+                Scan this QR code at the event entrance.
+              </p>
+            </div>
+          `;
+
+          await emailApi.sendTransacEmail(email);
+          console.log("📧 Email sent to", customer.email);
+
+        } catch (err) {
+          console.error("❌ Brevo email error:", err?.response?.body || err);
+        }
+      });
+    }
 
     /* =========================
-       QR CODE
+       TRANSFER SUCCESS
     ========================== */
-    const qrData = await QRCode.toDataURL(ticketRef.id);
-    const qrBase64 = qrData.split(",")[1];
-    await ticketRef.update({ qr: qrBase64 });
-
-    /* =========================
-       LEDGER (AUDIT LOG)
-    ========================== */
-    await db.collection("wallet_transactions").add({
-      reference,
-      eventId: metadata.eventId,
-      eventName: eventDoc.name,
-      orgName: eventDoc.orgName,
-      organizerId,
-      grossAmount: paidAmount,
-      platformFee,
-      organizerAmount,
-      type: "ticket_sale",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    res.sendStatus(200);
-
     if (payload.event === "transfer.success") {
-  const ref = payload.data.reference;
+      const ref = payload.data.reference;
 
-  const snap = await db
-    .collection("withdrawals")
-    .where("reference", "==", ref)
-    .limit(1)
-    .get();
+      const snap = await db
+        .collection("withdrawals")
+        .where("reference", "==", ref)
+        .limit(1)
+        .get();
 
-  if (!snap.empty) {
-    await snap.docs[0].ref.update({ status: "success" });
-  }
-}
+      if (!snap.empty) {
+        await snap.docs[0].ref.update({
+          status: "success",
+          completedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    }
 
-
-    /* =========================
-       EMAIL (ASYNC)
-    ========================== */
-
-    console.log("sending mail");
-    console.log(customer);
-    
-    
-    /* =========================
-   EMAIL VIA BREVO API
-========================= */
-setImmediate(async () => {
-  try {
-    const email = new Brevo.SendSmtpEmail();
-
-    email.subject = "🎫 Your Ticket Confirmation";
-    email.sender = {
-      name: "Airticks Event",
-      email: process.env.EMAIL_FROM,
-    };
-
-    email.to = [
-      {
-        email: customer.email,
-        name: metadata.fullName || "Guest",
-      },
-    ];
-
-    email.htmlContent = `
-      <div style="font-family: Arial, sans-serif; max-width:600px; margin:auto; padding:20px; border:1px solid #eee; border-radius:12px;">
-        <h2 style="text-align:center;">🎉 Ticket Confirmed!</h2>
-        <p>Hello ${metadata.fullName || "Guest"},</p>
-
-        <p>Your ticket for <b>${eventDoc.name}</b> has been successfully confirmed.</p>
-
-        <table style="width:100%; margin:16px 0;">
-          <tr><td><b>Reference</b></td><td>${reference}</td></tr>
-          <tr><td><b>Tickets</b></td><td>${metadata.ticketNumber}</td></tr>
-          <tr><td><b>Amount</b></td><td>₦${paidAmount}</td></tr>
-          <tr><td><b>Status</b></td><td style="color:green;">SUCCESS</td></tr>
-        </table>
-
-        <p style="text-align:center;">
-          <img src="data:image/png;base64,${qrBase64}" width="200" />
-        </p>
-
-        <p style="font-size:12px; color:#777; text-align:center;">
-          Scan this QR code at the event entrance.
-        </p>
-      </div>
-    `;
-
-    await emailApi.sendTransacEmail(email);
-    console.log("📧 Email sent to", customer.email, metadata.fullName);
+    return res.sendStatus(200);
 
   } catch (err) {
-    console.error("❌ Brevo email error:", err?.response?.body || err);
+    console.error("❌ PAYSTACK WEBHOOK ERROR:", err);
+    return res.sendStatus(500);
   }
 });
 
-  } catch (err) {
-    console.error("WEBHOOK ERROR:", err);
-    res.sendStatus(500);
-  }
-});
 
 const authenticate = async (req, res, next) => {
   const token = req.headers.authorization?.split("Bearer ")[1];
@@ -591,7 +585,7 @@ app.get("/api/withdrawals", authenticate, async (req, res) => {
     }
 
     const snap = await query.orderBy("createdAt", "desc").limit(20).get();
-    
+
     const history = snap.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
