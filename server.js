@@ -502,6 +502,34 @@ if (payload.event === "settlement.success") {
   }
 });
 
+
+
+
+const authenticate = async (req, res, next) => {
+  const token = req.headers.authorization?.split("Bearer ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    // 1️⃣ Verify Firebase ID token
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.user = decoded; // uid, email, etc.
+
+    // 2️⃣ Fetch user from Firestore
+    const userSnap = await db.collection("users").doc(decoded.uid).get();
+    if (!userSnap.exists) {
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    const userData = userSnap.data();
+    req.user.isAdmin = userData.isAdmin === true; // check the field in your users doc
+
+    next();
+  } catch (err) {
+    console.error(err);
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
 /* ============================================================
    TICKET VERIFICATION (QR SCANNER)
 ============================================================ */
@@ -548,32 +576,6 @@ app.post("/api/tickets/verify", authenticate, async (req, res) => {
     res.status(500).json({ error: "Verification failed" });
   }
 });
-
-
-const authenticate = async (req, res, next) => {
-  const token = req.headers.authorization?.split("Bearer ")[1];
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
-
-  try {
-    // 1️⃣ Verify Firebase ID token
-    const decoded = await admin.auth().verifyIdToken(token);
-    req.user = decoded; // uid, email, etc.
-
-    // 2️⃣ Fetch user from Firestore
-    const userSnap = await db.collection("users").doc(decoded.uid).get();
-    if (!userSnap.exists) {
-      return res.status(401).json({ error: "User not found" });
-    }
-
-    const userData = userSnap.data();
-    req.user.isAdmin = userData.isAdmin === true; // check the field in your users doc
-
-    next();
-  } catch (err) {
-    console.error(err);
-    return res.status(401).json({ error: "Invalid token" });
-  }
-};
 
 
 
