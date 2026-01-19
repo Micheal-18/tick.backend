@@ -73,6 +73,13 @@ app.post("/api/create-subaccount", async (req, res) => {
       return res.status(400).json({ error: data.message });
     }
 
+    await db.collection("subaccounts")
+      .doc(data.data.subaccount_code)
+      .set({
+        organizerId: req.body.organizerId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
     res.json({
       subaccount_code: data.data.subaccount_code,
     });
@@ -163,7 +170,7 @@ app.post("/api/init-payment", async (req, res) => {
           email,
           amount: amountInKobo,
           subaccount: event.subaccountCode,
-          transaction_charge: Math.round(amountInKobo * 0.08),
+          // transaction_charge: Math.round(amountInKobo * 0.08),
           metadata: {
             eventId,
             ticketLabel,
@@ -270,24 +277,23 @@ app.post("/api/webhook/paystack", async (req, res) => {
         const platformSnap = await tx.get(platformWalletRef);
         const organizerSnap = await tx.get(organizerWalletRef);
 
-        // Platform wallet
+        // PLATFORM (real money)
         tx.set(
           platformWalletRef,
           {
             balance: (platformSnap.data()?.balance || 0) + platformFee,
-            totalEarned:
-              (platformSnap.data()?.totalEarned || 0) + platformFee,
+            totalEarned: (platformSnap.data()?.totalEarned || 0) + platformFee,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
           { merge: true }
         );
 
-        // Organizer wallet
+        // ORGANIZER (pending only)
         tx.set(
           organizerWalletRef,
           {
-            balance:
-              (organizerSnap.data()?.balance || 0) + organizerAmount,
+            pendingBalance:
+              (organizerSnap.data()?.pendingBalance || 0) + organizerAmount,
             totalEarned:
               (organizerSnap.data()?.totalEarned || 0) + organizerAmount,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -295,18 +301,22 @@ app.post("/api/webhook/paystack", async (req, res) => {
           { merge: true }
         );
 
-        // Event stats
+        // EVENT STATS (NO MONEY)
         tx.set(
           eventRef,
           {
             ticketSold: (eventDoc.ticketSold || 0) + metadata.ticketNumber,
-            revenue: (eventDoc.revenue || 0) + paidAmount,
-            balance: (eventDoc.balance || 0) + organizerAmount,
+            grossRevenue: (eventDoc.grossRevenue || 0) + paidAmount,
+            organizerRevenue:
+              (eventDoc.organizerRevenue || 0) + organizerAmount,
+            platformRevenue:
+              (eventDoc.platformRevenue || 0) + platformFee,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
           { merge: true }
         );
 
-        // Ticket
+        // TICKET
         tx.set(ticketRef, {
           reference,
           eventId: metadata.eventId,
@@ -320,6 +330,7 @@ app.post("/api/webhook/paystack", async (req, res) => {
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
       });
+
 
       /* =========================
          QR CODE
@@ -396,38 +407,145 @@ app.post("/api/webhook/paystack", async (req, res) => {
       });
     }
 
+/* ============================================================
+   SETTLEMENT SUCCESS (Paystack has sent money to the bank)
+============================================================ */
+if (payload.event === "settlement.success") {
+  const settlementData = payload.data;
+  
+  // 1. Get the subaccount code and total amount settled
+  const subCode = settlementData.subaccount?.subaccount_code;
+  const amount = settlementData.total_amount / 100; // Paystack uses total_amount in settlements
+  const reference = settlementData.id.toString(); // Use the Settlement ID as reference
+
+  if (subCode) {
+    // 2. Map subaccount to your internal Organizer ID
+    const mapSnap = await db.collection("subaccounts").doc(subCode).get();
+    
+    if (mapSnap.exists) {
+      const organizerId = mapSnap.data().organizerId;
+      const walletRef = db.collection("wallets").doc(organizerId);
+
+      // 3. Prevent duplicate processing
+      const existing = await db.collection("wallet_transactions")
+        .where("type", "==", "settlement")
+        .where("reference", "==", reference)
+        .limit(1).get();
+
+      if (existing.empty) {
+        await db.runTransaction(async (tx) => {
+          const walletSnap = await tx.get(walletRef);
+          const data = walletSnap.data();
+    
+    // Safety check: ensure we don't subtract more than exists
+    const amountToSubtract = Math.min(data?.pendingBalance || 0, amount);
+
+          // 4. Update the balances
+          tx.update(walletRef, {
+            // Subtract from pending, add to settled
+            pendingBalance: admin.firestore.FieldValue.increment(-amountToSubtract),
+            settledBalance: admin.firestore.FieldValue.increment(amount),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+
+          // 5. Create the audit trail
+          const ledgerRef = db.collection("wallet_transactions").doc();
+          tx.set(ledgerRef, {
+            organizerId,
+            amount,
+            reference,
+            type: "settlement",
+            source: "paystack_to_bank",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+        
+        console.log(`✅ Settlement of ₦${amount} processed for ${organizerId}`);
+      }
+    }
+  }
+}
+
+
     /* =========================
        TRANSFER SUCCESS
     ========================== */
-    if (payload.event === "transfer.success") {
-      const ref = payload.data.reference;
+    // if (payload.event === "transfer.success") {
+    //   const ref = payload.data.reference;
 
-      const snap = await db
-        .collection("withdrawals")
-        .where("reference", "==", ref)
-        .limit(1)
-        .get();
+    //   const snap = await db
+    //     .collection("withdrawals")
+    //     .where("reference", "==", ref)
+    //     .limit(1)
+    //     .get();
 
-      if (!snap.empty) {
-        await snap.docs[0].ref.update({
-          status: "success",
-          completedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+    //   if (!snap.empty) {
+    //     await snap.docs[0].ref.update({
+    //       status: "success",
+    //       completedAt: admin.firestore.FieldValue.serverTimestamp(),
+    //     });
 
-const withdrawal = snap.docs[0].data();
+    //     const withdrawal = snap.docs[0].data();
 
-await db.collection("events").doc(withdrawal.eventId).update({
-  isWithdrawing: false,
-});
+    //     await db.collection("events").doc(withdrawal.eventId).update({
+    //       isWithdrawing: false,
+    //     });
 
-      }
-    }
+    //   }
+    // }
 
     return res.sendStatus(200);
 
   } catch (err) {
     console.error("❌ PAYSTACK WEBHOOK ERROR:", err);
     return res.sendStatus(500);
+  }
+});
+
+/* ============================================================
+   TICKET VERIFICATION (QR SCANNER)
+============================================================ */
+app.post("/api/tickets/verify", authenticate, async (req, res) => {
+  try {
+    const { ticketId } = req.body; // This is the ID encoded in the QR code
+
+    if (!ticketId) return res.status(400).json({ error: "No Ticket ID provided" });
+
+    const ticketRef = db.collection("tickets").doc(ticketId);
+    const ticketSnap = await ticketRef.get();
+
+    if (!ticketSnap.exists) {
+      return res.status(404).json({ error: "Invalid Ticket: Not found in system." });
+    }
+
+    const ticket = ticketSnap.data();
+
+    // 1. Check if it's already used
+    if (ticket.used) {
+      return res.status(400).json({
+        error: "Ticket already used!",
+        usedAt: ticket.usedAt?.toDate(),
+      });
+    }
+
+    // 2. Mark as used so they can't enter twice
+    await ticketRef.update({
+      used: true,
+      usedAt: admin.firestore.FieldValue.serverTimestamp(),
+      verifiedBy: req.user.uid // Tracks which staff member scanned it
+    });
+
+    return res.json({
+      success: true,
+      message: "Ticket Verified! Welcome to the event.",
+      buyerName: ticket.buyerName,
+      eventName: ticket.eventName,
+      ticketNumber: ticket.ticketNumber
+    });
+
+  } catch (err) {
+    console.error("Verification Error:", err);
+    res.status(500).json({ error: "Verification failed" });
   }
 });
 
@@ -462,185 +580,234 @@ const authenticate = async (req, res, next) => {
 /* =======================
    ADMIN FETCH WITHDRAW REQUESTS
 ======================= */
-app.get("/api/admin/withdraw/requests", authenticate, async (req, res) => {
-  if (!req.user.isAdmin) {
-    return res.status(403).json({ error: "Admin only" });
-  }
+// app.get("/api/admin/withdraw/requests", authenticate, async (req, res) => {
+//   if (!req.user.isAdmin) {
+//     return res.status(403).json({ error: "Admin only" });
+//   }
 
-  try {
-    const snap = await db
-      .collection("withdraw_requests")
-      .orderBy("createdAt", "desc")
-      .get();
+//   try {
+//     const snap = await db
+//       .collection("withdraw_requests")
+//       .orderBy("createdAt", "desc")
+//       .get();
 
-    const requests = snap.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-      createdAt: doc.data().createdAt?.toDate(),
-    }));
+//     const requests = snap.docs.map(doc => ({
+//       id: doc.id,
+//       ...doc.data(),
+//       createdAt: doc.data().createdAt?.toDate(),
+//     }));
 
-    res.json(requests);
-  } catch (err) {
-    console.error("Admin fetch error:", err);
-    res.status(500).json({ error: "Failed to fetch requests" });
-  }
-});
+//     res.json(requests);
+//   } catch (err) {
+//     console.error("Admin fetch error:", err);
+//     res.status(500).json({ error: "Failed to fetch requests" });
+//   }
+// });
 
 /* =======================
    ADMIN WITHDRAW
 ======================= */
 
 // Example backend helper
-const payWithPaystack = async ({ amount, accountNumber, bankCode, accountName, reason }) => {
-  // 1. Create transfer recipient
-  const resRecipient = await fetch("https://api.paystack.co/transferrecipient", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      type: "nuban",
-      name: accountName,
-      account_number: accountNumber,
-      bank_code: bankCode,
-      currency: "NGN",
-    }),
-  });
-  const recipientData = await resRecipient.json();
-  if (!recipientData.status) throw new Error(recipientData.message);
+// const payWithPaystack = async ({ amount, accountNumber, bankCode, accountName, reason }) => {
+//   // 1. Create transfer recipient
+//   const resRecipient = await fetch("https://api.paystack.co/transferrecipient", {
+//     method: "POST",
+//     headers: {
+//       Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+//       "Content-Type": "application/json",
+//     },
+//     body: JSON.stringify({
+//       type: "nuban",
+//       name: accountName,
+//       account_number: accountNumber,
+//       bank_code: bankCode,
+//       currency: "NGN",
+//     }),
+//   });
+//   const recipientData = await resRecipient.json();
+//   if (!recipientData.status) throw new Error(recipientData.message);
 
-  // 2. Initiate transfer
-  const resTransfer = await fetch("https://api.paystack.co/transfer", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      source: "balance",
-      amount: amount * 100,
-      recipient: recipientData.data.recipient_code,
-      reason,
-    }),
-  });
-  const transferData = await resTransfer.json();
-  if (!transferData.status) throw new Error(transferData.message);
+//   // 2. Initiate transfer
+//   const resTransfer = await fetch("https://api.paystack.co/transfer", {
+//     method: "POST",
+//     headers: {
+//       Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+//       "Content-Type": "application/json",
+//     },
+//     body: JSON.stringify({
+//       source: "balance",
+//       amount: amount * 100,
+//       recipient: recipientData.data.recipient_code,
+//       reason,
+//     }),
+//   });
+//   const transferData = await resTransfer.json();
+//   if (!transferData.status) throw new Error(transferData.message);
 
-  return transferData.data;
-};
+//   return transferData.data;
+// };
 
 
-app.post("/api/admin/withdraw/pay", authenticate, async (req, res) => {
-  if (!req.user.isAdmin)
-    return res.status(403).json({ error: "Admin only" });
+// app.post("/api/admin/withdraw/pay", authenticate, async (req, res) => {
+//   if (!req.user.isAdmin)
+//     return res.status(403).json({ error: "Admin only" });
 
-  const { requestId } = req.body;
-  if (!requestId)
-    return res.status(400).json({ error: "requestId required" });
+//   const { requestId } = req.body;
+//   if (!requestId)
+//     return res.status(400).json({ error: "requestId required" });
 
-  try {
-    const db = admin.firestore();
+//   try {
+//     const db = admin.firestore();
 
-    // 1. Fetch withdraw request
-    const requestRef = db.collection("withdraw_requests").doc(requestId);
-    const requestSnap = await requestRef.get();
+//     // 1. Fetch withdraw request
+//     const requestRef = db.collection("withdraw_requests").doc(requestId);
+//     const requestSnap = await requestRef.get();
 
-    if (!requestSnap.exists)
-      return res.status(404).json({ error: "Request not found" });
+//     if (!requestSnap.exists)
+//       return res.status(404).json({ error: "Request not found" });
 
-    const request = requestSnap.data();
-    if (request.status !== "pending")
-      return res.status(400).json({ error: "Already processed" });
+//     const request = requestSnap.data();
+//     if (request.status !== "pending")
+//       return res.status(400).json({ error: "Already processed" });
 
-    // 2. Fetch event
-    const eventRef = db.collection("events").doc(request.eventId);
-    const eventSnap = await eventRef.get();
+//     // 2. Fetch event
+//     const eventRef = db.collection("events").doc(request.eventId);
+//     const eventSnap = await eventRef.get();
 
-    if (!eventSnap.exists)
-      return res.status(404).json({ error: "Event not found" });
+//     if (!eventSnap.exists)
+//       return res.status(404).json({ error: "Event not found" });
 
-    const event = eventSnap.data();
+//     const event = eventSnap.data();
 
-    if (event.balance < request.amount)
-      return res.status(400).json({ error: "Insufficient event balance" });
+//     if (event.balance < request.amount)
+//       return res.status(400).json({ error: "Insufficient event balance" });
 
-    // 3. Paystack payout
-    const transfer = await payWithPaystack({
-      amount: request.amount,
-      accountNumber: event.accountNumber,
-      bankCode: event.bankCode,
-      accountName: event.accountName,
-      reason: `Payout for ${event.name}`,
-    });
+//     // 3. Paystack payout
+//     const transfer = await payWithPaystack({
+//       amount: request.amount,
+//       accountNumber: event.accountNumber,
+//       bankCode: event.bankCode,
+//       accountName: event.accountName,
+//       reason: `Payout for ${event.name}`,
+//     });
 
-    // 4. Firestore transaction
-    await db.runTransaction(async (tx) => {
-      tx.update(eventRef, {
-        balance: admin.firestore.FieldValue.increment(-request.amount),
-      });
+//     // 4. Firestore transaction
+//     await db.runTransaction(async (tx) => {
+//       tx.update(eventRef, {
+//         balance: admin.firestore.FieldValue.increment(-request.amount),
+//       });
 
-      tx.update(requestRef, {
-        status: "success",
-        paidAt: admin.firestore.FieldValue.serverTimestamp(),
-        reference: transfer.reference,
-      });
+//       tx.update(requestRef, {
+//         status: "success",
+//         paidAt: admin.firestore.FieldValue.serverTimestamp(),
+//         reference: transfer.reference,
+//       });
 
-      tx.set(db.collection("wallet_transactions").doc(), {
-        organizerId: request.organizerId,
-        eventId: request.eventId,
-        amount: request.amount,
-        type: "withdrawal",
-        reference: transfer.reference,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-    });
+//       tx.set(db.collection("wallet_transactions").doc(), {
+//         organizerId: request.organizerId,
+//         eventId: request.eventId,
+//         amount: request.amount,
+//         type: "withdrawal",
+//         reference: transfer.reference,
+//         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+//       });
+//     });
 
-    res.json({
-      success: true,
-      reference: transfer.reference,
-    });
-  } catch (err) {
-    console.error("Admin payout error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
+//     res.json({
+//       success: true,
+//       reference: transfer.reference,
+//     });
+//   } catch (err) {
+//     console.error("Admin payout error:", err);
+//     res.status(500).json({ error: err.message });
+//   }
+// });
 
 
 /* =======================
    ORGANIZER reQUEST WITHDRAWAL
 ======================= */
-app.post("/api/withdraw/requests", authenticate, async (req, res) => {
-  const { amount, eventId } = req.body;
-  const organizerId = req.user.uid;
+// app.post("/api/withdraw/requests", authenticate, async (req, res) => {
+//   const { amount, eventId } = req.body;
+//   const organizerId = req.user.uid;
 
-  if (!eventId || !amount || amount <= 0)
-    return res.status(400).json({ error: "Invalid request" });
+//   if (!eventId || !amount || amount <= 0)
+//     return res.status(400).json({ error: "Invalid request" });
 
-  const eventRef = db.collection("events").doc(eventId);
-  const eventSnap = await eventRef.get();
+//   const eventRef = db.collection("events").doc(eventId);
+//   const eventSnap = await eventRef.get();
 
-  if (!eventSnap.exists)
-    return res.status(404).json({ error: "Event not found" });
+//   if (!eventSnap.exists)
+//     return res.status(404).json({ error: "Event not found" });
 
-  const event = eventSnap.data();
+//   const event = eventSnap.data();
 
-  if (event.ownerId !== organizerId)
-    return res.status(403).json({ error: "Not your event" });
+//   if (event.ownerId !== organizerId)
+//     return res.status(403).json({ error: "Not your event" });
 
-  if (event.balance < amount)
-    return res.status(400).json({ error: "Insufficient balance" });
+//   if (event.balance < amount)
+//     return res.status(400).json({ error: "Insufficient balance" });
 
-  await db.collection("withdraw_requests").add({
-    organizerId,
-    eventId,
-    eventName: event.name,
-    amount,
-    status: "pending",
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+//   await db.collection("withdraw_requests").add({
+//     organizerId,
+//     eventId,
+//     eventName: event.name,
+//     amount,
+//     status: "pending",
+//     createdAt: admin.firestore.FieldValue.serverTimestamp(),
+//   });
 
-  res.json({ success: true });
+//   res.json({ success: true });
+// });
+
+/* ============================================================
+   ADMIN WITHDRAWAL (Platform Funds)
+============================================================ */
+app.post("/api/admin/withdraw", authenticate, async (req, res) => {
+  // 1. Safety Check: Is the user actually an admin?
+  if (!req.user.isAdmin) {
+    return res.status(403).json({ error: "Unauthorized: Admin access only" });
+  }
+
+  const { amount } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
+
+  try {
+    const platformWalletRef = db.collection("wallets").doc("platform");
+
+    await db.runTransaction(async (tx) => {
+      const platformSnap = await tx.get(platformWalletRef);
+      const currentBalance = platformSnap.data()?.balance || 0;
+
+      // 2. Double-check balance on the server (Security best practice)
+      if (currentBalance < amount) {
+        throw new Error("Insufficient platform balance");
+      }
+
+      // 3. Subtract from Platform Wallet
+      tx.update(platformWalletRef, {
+        balance: admin.firestore.FieldValue.increment(-amount),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // 4. Log the transaction for your accounting
+      const ledgerRef = db.collection("wallet_transactions").doc();
+      tx.set(ledgerRef, {
+        amount,
+        type: "platform_withdrawal",
+        adminId: req.user.uid,
+        status: "success",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    res.json({ success: true, message: "Withdrawal recorded successfully" });
+
+  } catch (err) {
+    console.error("Platform Withdrawal Error:", err);
+    res.status(500).json({ error: err.message || "Failed to process withdrawal" });
+  }
 });
 
 
@@ -691,6 +858,44 @@ app.get("/api/withdrawals", authenticate, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch withdrawals" });
+  }
+});
+
+app.post("/api/payout-history", authenticate, async (req, res) => {
+  try {
+    const { organizerId, startDate, endDate } = req.body;
+    if (req.user.uid !== organizerId && !req.user.isAdmin) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    let query = db
+      .collection("wallet_transactions")
+      .where("organizerId", "==", organizerId)
+      .where("type", "==", "settlement");
+    if (startDate) {
+      query = query.where(
+        "createdAt",
+        ">=",
+        admin.firestore.Timestamp.fromDate(new Date(startDate))
+      );
+    }
+    if (endDate) {
+      query = query.where(
+        "createdAt",
+        "<=",
+        admin.firestore.Timestamp.fromDate(new Date(endDate))
+      );
+    }
+    const snap = await query.orderBy("createdAt", "desc").get();
+    const history = snap.docs.map(doc => ({
+      id: doc.id,
+      amount: doc.data().amount,
+      reference: doc.data().reference,
+      createdAt: doc.data().createdAt?.toDate(),
+    }));
+    res.json(history);
+  } catch (err) {
+    console.error("Payout history error:", err);
+    res.status(500).json({ error: "Failed to fetch payout history" });
   }
 });
 
