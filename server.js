@@ -335,8 +335,15 @@ app.post("/api/webhook/paystack", async (req, res) => {
       /* =========================
          QR CODE
       ========================== */
-      const qrData = await QRCode.toDataURL(ticketRef.id);
-      const qrBase64 = qrData.split(",")[1];
+      const qrData = await QRCode.toDataURL(ticketRef.id, {
+        width: 220,
+        margin: 1,
+        errorCorrectionLevel: "M",
+      });
+
+      // remove prefix ONCE
+      const qrBase64 = qrData.replace(/^data:image\/png;base64,/, "");
+
       await ticketRef.update({ qr: qrBase64 });
 
       /* =========================
@@ -362,6 +369,8 @@ app.post("/api/webhook/paystack", async (req, res) => {
           const email = new Brevo.SendSmtpEmail();
 
           email.subject = "🎫 Your Ticket Confirmation";
+
+
           email.sender = {
             name: "Airticks Event",
             email: process.env.EMAIL_FROM,
@@ -371,6 +380,13 @@ app.post("/api/webhook/paystack", async (req, res) => {
             {
               email: customer.email,
               name: metadata.fullName || "Guest",
+            },
+          ];
+
+          email.attachment = [
+            {
+              name: "ticket-qr.png",
+              content: qrBase64,
             },
           ];
 
