@@ -24,6 +24,31 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
+const authenticate = async (req, res, next) => {
+  const token = req.headers.authorization?.split("Bearer ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    // 1️⃣ Verify Firebase ID token
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.user = decoded; // uid, email, etc.
+
+    // 2️⃣ Fetch user from Firestore
+    const userSnap = await db.collection("users").doc(decoded.uid).get();
+    if (!userSnap.exists) {
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    const userData = userSnap.data();
+    req.user.isAdmin = userData.isAdmin === true; // check the field in your users doc
+
+    next();
+  } catch (err) {
+    console.error(err);
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
 /* =======================
    BREVO EMAIL SETUP
 ======================= */
@@ -426,61 +451,61 @@ app.post("/api/webhook/paystack", async (req, res) => {
 /* ============================================================
    SETTLEMENT SUCCESS (Paystack has sent money to the bank)
 ============================================================ */
-if (payload.event === "settlement.success") {
-  const settlementData = payload.data;
+// if (payload.event === "settlement.success") {
+//   const settlementData = payload.data;
   
-  // 1. Get the subaccount code and total amount settled
-  const subCode = settlementData.subaccount?.subaccount_code;
-  const amount = settlementData.total_amount / 100; // Paystack uses total_amount in settlements
-  const reference = settlementData.id.toString(); // Use the Settlement ID as reference
+//   // 1. Get the subaccount code and total amount settled
+//   const subCode = settlementData.subaccount?.subaccount_code;
+//   const amount = settlementData.total_amount / 100; // Paystack uses total_amount in settlements
+//   const reference = settlementData.id.toString(); // Use the Settlement ID as reference
 
-  if (subCode) {
-    // 2. Map subaccount to your internal Organizer ID
-    const mapSnap = await db.collection("subaccounts").doc(subCode).get();
+//   if (subCode) {
+//     // 2. Map subaccount to your internal Organizer ID
+//     const mapSnap = await db.collection("subaccounts").doc(subCode).get();
     
-    if (mapSnap.exists) {
-      const organizerId = mapSnap.data().organizerId;
-      const walletRef = db.collection("wallets").doc(organizerId);
+//     if (mapSnap.exists) {
+//       const organizerId = mapSnap.data().organizerId;
+//       const walletRef = db.collection("wallets").doc(organizerId);
 
-      // 3. Prevent duplicate processing
-      const existing = await db.collection("wallet_transactions")
-        .where("type", "==", "settlement")
-        .where("reference", "==", reference)
-        .limit(1).get();
+//       // 3. Prevent duplicate processing
+//       const existing = await db.collection("wallet_transactions")
+//         .where("type", "==", "settlement")
+//         .where("reference", "==", reference)
+//         .limit(1).get();
 
-      if (existing.empty) {
-        await db.runTransaction(async (tx) => {
-          const walletSnap = await tx.get(walletRef);
-          const data = walletSnap.data();
+//       if (existing.empty) {
+//         await db.runTransaction(async (tx) => {
+//           const walletSnap = await tx.get(walletRef);
+//           const data = walletSnap.data();
     
-    // Safety check: ensure we don't subtract more than exists
-    const amountToSubtract = Math.min(data?.pendingBalance || 0, amount);
+//     // Safety check: ensure we don't subtract more than exists
+//     const amountToSubtract = Math.min(data?.pendingBalance || 0, amount);
 
-          // 4. Update the balances
-          tx.update(walletRef, {
-            // Subtract from pending, add to settled
-            pendingBalance: admin.firestore.FieldValue.increment(-amountToSubtract),
-            settledBalance: admin.firestore.FieldValue.increment(amount),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+//           // 4. Update the balances
+//           tx.update(walletRef, {
+//             // Subtract from pending, add to settled
+//             pendingBalance: admin.firestore.FieldValue.increment(-amountToSubtract),
+//             settledBalance: admin.firestore.FieldValue.increment(amount),
+//             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+//           });
 
-          // 5. Create the audit trail
-          const ledgerRef = db.collection("wallet_transactions").doc();
-          tx.set(ledgerRef, {
-            organizerId,
-            amount,
-            reference,
-            type: "settlement",
-            source: "paystack_to_bank",
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
-        });
+//           // 5. Create the audit trail
+//           const ledgerRef = db.collection("wallet_transactions").doc();
+//           tx.set(ledgerRef, {
+//             organizerId,
+//             amount,
+//             reference,
+//             type: "settlement",
+//             source: "paystack_to_bank",
+//             createdAt: admin.firestore.FieldValue.serverTimestamp(),
+//           });
+//         });
         
-        console.log(`✅ Settlement of ₦${amount} processed for ${organizerId}`);
-      }
-    }
-  }
-}
+//         console.log(`✅ Settlement of ₦${amount} processed for ${organizerId}`);
+//       }
+//     }
+//   }
+// }
 
 
     /* =========================
@@ -520,78 +545,117 @@ if (payload.event === "settlement.success") {
 
 
 
-
-const authenticate = async (req, res, next) => {
-  const token = req.headers.authorization?.split("Bearer ")[1];
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
-
-  try {
-    // 1️⃣ Verify Firebase ID token
-    const decoded = await admin.auth().verifyIdToken(token);
-    req.user = decoded; // uid, email, etc.
-
-    // 2️⃣ Fetch user from Firestore
-    const userSnap = await db.collection("users").doc(decoded.uid).get();
-    if (!userSnap.exists) {
-      return res.status(401).json({ error: "User not found" });
-    }
-
-    const userData = userSnap.data();
-    req.user.isAdmin = userData.isAdmin === true; // check the field in your users doc
-
-    next();
-  } catch (err) {
-    console.error(err);
-    return res.status(401).json({ error: "Invalid token" });
-  }
-};
-
 /* ============================================================
-   TICKET VERIFICATION (QR SCANNER)
+   FETCH PAYSTACK SETTLEMENTS (BANK PAID STATUS)
 ============================================================ */
-app.post("/api/tickets/verify", authenticate, async (req, res) => {
+app.get("/api/paystack/settlements", authenticate, async (req, res) => {
   try {
-    const { ticketId } = req.body; // This is the ID encoded in the QR code
-
-    if (!ticketId) return res.status(400).json({ error: "No Ticket ID provided" });
-
-    const ticketRef = db.collection("tickets").doc(ticketId);
-    const ticketSnap = await ticketRef.get();
-
-    if (!ticketSnap.exists) {
-      return res.status(404).json({ error: "Invalid Ticket: Not found in system." });
+    // 🔐 Optional: restrict to admin only
+    if (!req.user.isAdmin) {
+      return res.status(403).json({ error: "Admin only" });
     }
 
-    const ticket = ticketSnap.data();
+    // 1️⃣ Fetch settlements from Paystack
+    const response = await fetch("https://api.paystack.co/settlement", {
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      },
+    });
 
-    // 1. Check if it's already used
-    if (ticket.used) {
-      return res.status(400).json({
-        error: "Ticket already used!",
-        usedAt: ticket.usedAt?.toDate(),
+    const result = await response.json();
+    if (!result.status) {
+      return res.status(400).json({ error: result.message });
+    }
+
+    const processed = [];
+
+    // 2️⃣ Process each settlement
+    for (const settlement of result.data) {
+      // Only confirmed bank payouts
+      if (settlement.status !== "success" || !settlement.paid_at) continue;
+
+      const subCode = settlement.subaccount?.subaccount_code;
+      if (!subCode) continue;
+
+      const settlementRef = settlement.id.toString();
+      const settlementAmount = settlement.total_amount / 100; // kobo → naira
+      const paidAt = new Date(settlement.paid_at);
+
+      // 3️⃣ Prevent duplicate settlement processing
+      const alreadyProcessed = await db
+        .collection("wallet_transactions")
+        .where("type", "==", "settlement")
+        .where("reference", "==", settlementRef)
+        .limit(1)
+        .get();
+
+      if (!alreadyProcessed.empty) continue;
+
+      // 4️⃣ Map subaccount → organizer
+      const subSnap = await db.collection("subaccounts").doc(subCode).get();
+      if (!subSnap.exists) continue;
+
+      const organizerId = subSnap.data().organizerId;
+      const walletRef = db.collection("wallets").doc(organizerId);
+
+      // 5️⃣ Atomic settlement transaction
+      await db.runTransaction(async (tx) => {
+        const walletSnap = await tx.get(walletRef);
+        const wallet = walletSnap.data() || {};
+
+        const pendingBalance = wallet.pendingBalance || 0;
+        const settledBalance = wallet.settledBalance || 0;
+
+        // Never settle more than what is pending
+        const amountToSettle = Math.min(pendingBalance, settlementAmount);
+
+        // Update wallet balances + PAID status
+        tx.set(
+          walletRef,
+          {
+            pendingBalance: pendingBalance - amountToSettle,
+            settledBalance: settledBalance + amountToSettle,
+            lastPaidAt: admin.firestore.Timestamp.fromDate(paidAt),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        // Ledger (source of truth)
+        tx.set(db.collection("wallet_transactions").doc(), {
+          organizerId,
+          reference: settlementRef,
+          amount: amountToSettle,
+          grossAmount: settlementAmount,
+          type: "settlement",
+          status: "paid",
+          source: "paystack",
+          paidAt,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+
+      processed.push({
+        organizerId,
+        amount: settlementAmount,
+        paidAt,
       });
     }
 
-    // 2. Mark as used so they can't enter twice
-    await ticketRef.update({
-      used: true,
-      usedAt: admin.firestore.FieldValue.serverTimestamp(),
-      verifiedBy: req.user.uid // Tracks which staff member scanned it
-    });
-
+    // 6️⃣ Response
     return res.json({
       success: true,
-      message: "Ticket Verified! Welcome to the event.",
-      buyerName: ticket.buyerName,
-      eventName: ticket.eventName,
-      ticketNumber: ticket.ticketNumber
+      processedCount: processed.length,
+      processed,
     });
 
   } catch (err) {
-    console.error("Verification Error:", err);
-    res.status(500).json({ error: "Verification failed" });
+    console.error("❌ Settlement sync error:", err);
+    res.status(500).json({ error: "Failed to sync settlements" });
   }
 });
+
+
 
 
 
