@@ -361,7 +361,7 @@ app.post("/api/webhook/paystack", async (req, res) => {
          QR CODE
       ========================== */
       const qrData = await QRCode.toDataURL(ticketRef.id, {
-        width: 220,
+        width: 320,
         margin: 1,
         errorCorrectionLevel: "M",
       });
