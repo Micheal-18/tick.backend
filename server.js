@@ -376,6 +376,21 @@ app.post('/api/webhook/paystack', async (req, res) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       })
 
+      await db.collection('notifications').add({
+        type: 'ticket_purchase',
+        title: '🎫 New Ticket Sold',
+        message: `${metadata.fullName || 'Someone'} bought ${
+          metadata.ticketNumber
+        } ticket(s) for ${eventDoc.name}`,
+        userId: organizerId, // organizer gets it
+        actorId: customer.email, // buyer
+        eventId: metadata.eventId,
+        amount: paidAmount,
+        reference,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      })
+
       /* =========================
          EMAIL (NON-BLOCKING)
       ========================== */
@@ -628,6 +643,18 @@ app.get('/api/paystack/settlements', authenticate, async (req, res) => {
         amount: settlementAmount,
         paidAt
       })
+
+      await db.collection('notifications').add({
+        type: 'settlement',
+        title: '💰 Settlement Received',
+        message: `₦${amount.toLocaleString()} has been settled to your bank`,
+        userId: organizerId,
+        amount,
+        reference,
+        link: '/dashboard/organization/wallet',
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      })
     }
 
     // 6️⃣ Response
@@ -864,6 +891,17 @@ app.post('/api/admin/withdraw', authenticate, async (req, res) => {
         status: 'success',
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       })
+    })
+
+    await db.collection('notifications').add({
+      type: 'platform_withdrawal',
+      title: '🏦 Platform Withdrawal',
+      message: `₦${amount.toLocaleString()} withdrawn by admin`,
+      userId: 'platform',
+      adminId: req.user.uid,
+      link: '/dashboard/wallet',
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
     })
 
     res.json({ success: true, message: 'Withdrawal recorded successfully' })
