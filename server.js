@@ -335,6 +335,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
         // TICKET
         tx.set(ticketRef, {
           reference,
+          organizerId,
           eventId: metadata.eventId,
           eventName: eventDoc.name,
           ticketNumber: ticketQty,
