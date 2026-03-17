@@ -338,6 +338,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
           eventId: metadata.eventId,
           eventName: eventDoc.name,
           ticketNumber: ticketQty,
+          ticketType: metadata.ticketLabel || 'Default Label',
           amount: paidAmount,
           status: 'success',
           used: false,
