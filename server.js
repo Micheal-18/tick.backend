@@ -115,12 +115,15 @@ app.post('/api/create-subaccount', async (req, res) => {
 /* =======================
    INIT PAYMENT
 ======================= */
+/* =======================
+   INIT PAYMENT (With Free Ticket Bypass)
+======================= */
 app.post('/api/init-payment', async (req, res) => {
   try {
     /* ===============================
        1. READ & VALIDATE INPUT
     =============================== */
-    const { name, email, eventId, ticketLabel, ticketNumber } = req.body
+    const { name, email, eventId, ticketLabel, ticketNumber, userId } = req.body
 
     if (!email || !eventId || !ticketLabel) {
       return res.status(400).json({ error: 'Missing required fields' })
@@ -141,43 +144,117 @@ app.post('/api/init-payment', async (req, res) => {
 
     const event = eventSnap.data()
 
-    if (!event.subaccountCode) {
-      return res.status(400).json({ error: 'Organizer payout not configured' })
-    }
-
     /* ===============================
        3. FIND TICKET
     =============================== */
     const ticket = event.price?.find(t => t.label === ticketLabel)
     if (!ticket) {
-      return res.status(400).json({ error: 'Ticket not found' })
+      return res.status(400).json({ error: 'Ticket type not found on this event' })
     }
 
     const ticketPrice = Number(ticket.amount)
-    if (isNaN(ticketPrice) || ticketPrice <= 0) {
-      return res.status(400).json({ error: 'Invalid ticket price' })
+    if (isNaN(ticketPrice) || ticketPrice < 0) {
+      return res.status(400).json({ error: 'Invalid ticket price configuration' })
     }
 
-    console.log('🧾 Incoming payload:', req.body)
-    console.log('🎟 Event price array:', event.price)
-    console.log('🎫 Selected ticket:', ticket)
-    console.log('🔢 Ticket amount raw:', ticket.amount)
-    console.log('🔢 Ticket qty raw:', qty)
-
-    /* ===============================
-       4. CALCULATE AMOUNT
-    =============================== */
     const totalAmount = ticketPrice * qty
-    const amountInKobo = Math.round(totalAmount * 100)
 
-    if (amountInKobo < 100) {
-      return res.status(400).json({ error: 'Amount too low for Paystack' })
+    /* ============================================================
+       ⚡ SHORT-CIRCUIT ROUTE FOR FREE TICKETS (0 NAIRA / 0 DOLLARS)
+    ============================================================ */
+    if (totalAmount === 0 || event.isFree === true) {
+      const freeReference = `FREE-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+      const organizerId = event.ownerId
+      const ticketRef = db.collection('tickets').doc(freeReference)
+
+      // 1. Atomic transaction to issue ticket and update analytics counters
+      await db.runTransaction(async tx => {
+        tx.set(eventSnap.ref, {
+          ticketSold: admin.firestore.FieldValue.increment(qty),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true })
+
+        tx.set(ticketRef, {
+          reference: freeReference,
+          organizerId,
+          userId: userId || null,
+          eventId,
+          eventName: event.name,
+          ticketNumber: qty,
+          ticketType: ticketLabel,
+          amount: 0,
+          status: 'success',
+          used: false,
+          email: email.toLowerCase().trim(),
+          buyerName: name || 'Guest',
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        })
+      })
+
+      // 2. Generate the visual pass QR asset code
+      const qrData = await QRCode.toDataURL(ticketRef.id, {
+        width: 320,
+        margin: 1,
+        errorCorrectionLevel: 'M'
+      })
+      const qrBase64 = qrData.replace(/^data:image\/png;base64,/, '')
+      await ticketRef.update({ qr: qrBase64 })
+
+      // 3. Dispatch the ticket via Brevo immediately (Non-blocking worker thread)
+      setImmediate(async () => {
+        try {
+          const emailPayload = new Brevo.SendSmtpEmail()
+          emailPayload.subject = `🎫 Your Free Pass Confirmation: ${event.name}`
+          emailPayload.sender = { name: 'Airticks Events', email: process.env.EMAIL_FROM }
+          emailPayload.to = [{ email: email.toLowerCase().trim(), name: name || 'Guest' }]
+          emailPayload.attachment = [{ name: 'ticket-qr.png', content: qrBase64 }]
+          emailPayload.htmlContent = `
+            <div style="font-family: Arial, sans-serif; max-width:600px; margin:auto; padding:20px; border:1px solid #eee; border-radius:12px;">
+              <h2 style="text-align:center; color:#16a34a;">🎉 Free Registration Confirmed!</h2>
+              <p>Hello ${name || 'Guest'},</p>
+              <p>Your free ticket pass for <b>${event.name}</b> is confirmed.</p>
+              <table style="width:100%; margin:16px 0;">
+                <tr><td><b>Ticket Reference</b></td><td>${freeReference}</td></tr>
+                <tr><td><b>Quantity Passed</b></td><td>${qty} Ticket(s)</td></tr>
+                <tr><td><b>Ticket Tier</b></td><td>${ticketLabel}</td></tr>
+                <tr><td><b>Price</b></td><td style="color:green; font-weight:bold;">FREE</td></tr>
+              </table>
+              <p style="text-align:center;">
+                <img src="data:image/png;base64,${qrBase64}" width="200" />
+              </p>
+              <p style="font-size:12px; color:#777; text-align:center;">
+                Present this QR code at the event gate checkpoint layout for entrance access validation.
+              </p>
+            </div>
+          `
+          await emailApi.sendTransacEmail(emailPayload)
+        } catch (emailErr) {
+          console.error('❌ Brevo background worker free ticket email error:', emailErr)
+        }
+      })
+
+      // 4. Return success to the frontend instantly so it knows there's no redirect URL needed
+      return res.json({
+        success: true,
+        isFree: true,
+        reference: freeReference,
+        message: 'Free ticket generated successfully!'
+      })
     }
 
-    /* ===============================
-       5. INIT PAYSTACK
-       (NO ADMIN FEE FOR NOW)
-    =============================== */
+    /* ============================================================
+       💳 PAID TICKETS WORKFLOW (PAYSTACK ROUTING CONTINUES BELOW)
+    ============================================================ */
+    if (!event.subaccountCode) {
+      return res.status(400).json({ error: 'Organizer payout routing parameters are unconfigured.' })
+    }
+
+    const amountInKobo = Math.round(totalAmount * 100)
+    if (amountInKobo < 100) {
+      return res.status(400).json({ error: 'Amount too low for Paystack channels processing.' })
+    }
+
+    console.log('🧾 Processing Paid Ticket Checkout Routing:', ticketLabel)
 
     const paystackRes = await fetch(
       'https://api.paystack.co/transaction/initialize',
@@ -191,12 +268,12 @@ app.post('/api/init-payment', async (req, res) => {
           email,
           amount: amountInKobo,
           subaccount: event.subaccountCode,
-          // transaction_charge: Math.round(amountInKobo * 0.08),
           metadata: {
             eventId,
             ticketLabel,
             ticketNumber: qty,
             platform: 'airticks',
+            userId: userId || null,
             fullName: name
           }
         })
@@ -206,21 +283,18 @@ app.post('/api/init-payment', async (req, res) => {
     const data = await paystackRes.json()
 
     if (!data.status) {
-      console.error('❌ Paystack error:', data)
+      console.error('❌ Paystack verification failure:', data)
       return res.status(400).json({ error: data.message })
     }
 
-    /* ===============================
-       6. SUCCESS RESPONSE
-    =============================== */
     return res.json({
       authorization_url: data.data.authorization_url,
       reference: data.data.reference,
-      amount: totalAmount // naira (for frontend)
+      amount: totalAmount
     })
   } catch (err) {
     console.error('INIT PAYMENT ERROR:', err)
-    return res.status(500).json({ error: 'Payment init failed' })
+    return res.status(500).json({ error: 'Payment initialization sequence faulted.' })
   }
 })
 
@@ -281,7 +355,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
       const platformWalletRef = db.collection('wallets').doc('platform')
       const organizerWalletRef = db.collection('wallets').doc(organizerId)
-      const ticketRef = db.collection('tickets').doc()
+      const ticketRef = db.collection('tickets').doc(reference)
 
       const ticketQty = Number(metadata.ticketNumber) || 1
 
@@ -336,6 +410,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
         tx.set(ticketRef, {
           reference,
           organizerId,
+          userId: metadata.userId || null,
           eventId: metadata.eventId,
           eventName: eventDoc.name,
           ticketNumber: ticketQty,
@@ -378,20 +453,18 @@ app.post('/api/webhook/paystack', async (req, res) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       })
 
-      await db.collection('notifications').add({
-        type: 'ticket_purchase',
-        title: '🎫 New Ticket Sold',
-        message: `${metadata.fullName || 'Someone'} bought ${
-          metadata.ticketNumber
-        } ticket(s) for ${eventDoc.name}`,
-        userId: organizerId, // organizer gets it
-        actorId: customer.email, // buyer
-        eventId: metadata.eventId,
-        amount: paidAmount,
-        reference,
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      })
+await db.collection('notifications').add({
+  type: 'ticket_purchase',
+  title: '🎫 New Ticket Sold',
+  message: `${metadata.fullName || 'Someone'} bought ${ticketQty} ticket(s) for ${eventDoc.name}`,
+  userId: organizerId,
+  actorId: customer.email,
+  eventId: metadata.eventId,
+  amount: paidAmount, // Cleaned Nairas decimal number
+  reference: reference, // Tied safely to payload reference variable 
+  read: false,
+  createdAt: admin.firestore.FieldValue.serverTimestamp()
+})
 
       /* =========================
          EMAIL (NON-BLOCKING)
@@ -649,10 +722,10 @@ app.get('/api/paystack/settlements', authenticate, async (req, res) => {
       await db.collection('notifications').add({
         type: 'settlement',
         title: '💰 Settlement Received',
-        message: `₦${amount.toLocaleString()} has been settled to your bank`,
+        message: `₦${settlementAmount.toLocaleString()} has been settled to your bank`,
         userId: organizerId,
-        amount,
-        reference,
+        amount: settlementAmount, // <-- FIXED Variable
+        reference: settlementRef, // <-- FIXED Variable
         link: '/dashboard/organization/wallet',
         read: false,
         createdAt: admin.firestore.FieldValue.serverTimestamp()
