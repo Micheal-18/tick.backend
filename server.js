@@ -113,9 +113,6 @@ app.post('/api/create-subaccount', async (req, res) => {
 })
 
 /* =======================
-   INIT PAYMENT
-======================= */
-/* =======================
    INIT PAYMENT (With Free Ticket Bypass)
 ======================= */
 app.post('/api/init-payment', async (req, res) => {
@@ -182,6 +179,7 @@ app.post('/api/init-payment', async (req, res) => {
           eventName: event.name,
           ticketNumber: qty,
           ticketType: ticketLabel,
+          location: event.location || 'TBA',
           amount: 0,
           status: 'success',
           used: false,
@@ -415,6 +413,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
           eventName: eventDoc.name,
           ticketNumber: ticketQty,
           ticketType: metadata.ticketLabel || 'Default Label',
+          location: eventDoc.location || 'TBA',
           amount: paidAmount,
           status: 'success',
           used: false,
@@ -460,6 +459,7 @@ await db.collection('notifications').add({
   userId: organizerId,
   actorId: customer.email,
   eventId: metadata.eventId,
+  location: eventDoc.location || 'TBA',
   amount: paidAmount, // Cleaned Nairas decimal number
   reference: reference, // Tied safely to payload reference variable 
   read: false,
