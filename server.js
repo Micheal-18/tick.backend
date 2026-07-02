@@ -8,6 +8,7 @@ import QRCode from 'qrcode'
 import Brevo from '@getbrevo/brevo'
 import crypto from 'crypto'
 
+
 const app = express()
 app.use(cors())
 
