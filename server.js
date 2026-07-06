@@ -442,6 +442,7 @@ app.post('/api/init-payment', async (req, res) => {
           email,
           amount: amountInKobo,
           subaccount: event.subaccountCode,
+          callback_url: `${process.env.FRONTEND_URL}/payment-success`,
           metadata: {
             eventId,
             ticketLabel,
@@ -707,92 +708,6 @@ await db.collection('notifications').add({
         }
       })
     }
-
-    /* ============================================================
-   SETTLEMENT SUCCESS (Paystack has sent money to the bank)
-============================================================ */
-    // if (payload.event === "settlement.success") {
-    //   const settlementData = payload.data;
-
-    //   // 1. Get the subaccount code and total amount settled
-    //   const subCode = settlementData.subaccount?.subaccount_code;
-    //   const amount = settlementData.total_amount / 100; // Paystack uses total_amount in settlements
-    //   const reference = settlementData.id.toString(); // Use the Settlement ID as reference
-
-    //   if (subCode) {
-    //     // 2. Map subaccount to your internal Organizer ID
-    //     const mapSnap = await db.collection("subaccounts").doc(subCode).get();
-
-    //     if (mapSnap.exists) {
-    //       const organizerId = mapSnap.data().organizerId;
-    //       const walletRef = db.collection("wallets").doc(organizerId);
-
-    //       // 3. Prevent duplicate processing
-    //       const existing = await db.collection("wallet_transactions")
-    //         .where("type", "==", "settlement")
-    //         .where("reference", "==", reference)
-    //         .limit(1).get();
-
-    //       if (existing.empty) {
-    //         await db.runTransaction(async (tx) => {
-    //           const walletSnap = await tx.get(walletRef);
-    //           const data = walletSnap.data();
-
-    //     // Safety check: ensure we don't subtract more than exists
-    //     const amountToSubtract = Math.min(data?.pendingBalance || 0, amount);
-
-    //           // 4. Update the balances
-    //           tx.update(walletRef, {
-    //             // Subtract from pending, add to settled
-    //             pendingBalance: admin.firestore.FieldValue.increment(-amountToSubtract),
-    //             settledBalance: admin.firestore.FieldValue.increment(amount),
-    //             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    //           });
-
-    //           // 5. Create the audit trail
-    //           const ledgerRef = db.collection("wallet_transactions").doc();
-    //           tx.set(ledgerRef, {
-    //             organizerId,
-    //             amount,
-    //             reference,
-    //             type: "settlement",
-    //             source: "paystack_to_bank",
-    //             createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    //           });
-    //         });
-
-    //         console.log(`✅ Settlement of ₦${amount} processed for ${organizerId}`);
-    //       }
-    //     }
-    //   }
-    // }
-
-    /* =========================
-       TRANSFER SUCCESS
-    ========================== */
-    // if (payload.event === "transfer.success") {
-    //   const ref = payload.data.reference;
-
-    //   const snap = await db
-    //     .collection("withdrawals")
-    //     .where("reference", "==", ref)
-    //     .limit(1)
-    //     .get();
-
-    //   if (!snap.empty) {
-    //     await snap.docs[0].ref.update({
-    //       status: "success",
-    //       completedAt: admin.firestore.FieldValue.serverTimestamp(),
-    //     });
-
-    //     const withdrawal = snap.docs[0].data();
-
-    //     await db.collection("events").doc(withdrawal.eventId).update({
-    //       isWithdrawing: false,
-    //     });
-
-    //   }
-    // }
 
     return res.sendStatus(200)
   } catch (err) {
