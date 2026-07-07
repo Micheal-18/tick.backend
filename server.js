@@ -233,6 +233,76 @@ Requirements:
   }
 });
 
+app.get("/api/banks", async (req, res) => {
+  try {
+    const response = await fetch(
+      "https://api.paystack.co/bank?country=nigeria",
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        },
+      }
+    );
+
+    const data = await response.json();
+
+    if (!data.status) {
+      return res.status(400).json({
+        error: data.message,
+      });
+    }
+
+    res.json(data.data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Unable to fetch banks",
+    });
+  }
+});
+
+app.post("/api/resolve-account", async (req, res) => {
+  try {
+    const { accountNumber, bankCode } = req.body;
+
+    if (!accountNumber || !bankCode) {
+      return res.status(400).json({
+        error: "Missing account details",
+      });
+    }
+
+    const response = await fetch(
+      `https://api.paystack.co/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        },
+      }
+    );
+
+    const data = await response.json();
+
+    if (!data.status) {
+      return res.status(400).json({
+        error: data.message,
+      });
+    }
+
+    res.json({
+      accountName: data.data.account_name,
+      accountNumber: data.data.account_number,
+      bankId: data.data.bank_id,
+    });
+
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      error: "Unable to resolve account",
+    });
+  }
+});
+
 /* =======================
    CREATE PAYSTACK SUBACCOUNT
 ======================= */
