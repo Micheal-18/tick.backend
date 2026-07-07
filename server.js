@@ -293,7 +293,8 @@ app.post('/api/init-payment', async (req, res) => {
     /* ===============================
        1. READ & VALIDATE INPUT
     =============================== */
-    const { name, email, eventId, ticketLabel, ticketNumber, userId } = req.body
+    const { name, email, eventId, ticketLabel, ticketNumber, userId, attendees = [] } = req.body
+
 
     if (!email || !eventId || !ticketLabel) {
       return res.status(400).json({ error: 'Missing required fields' })
@@ -304,7 +305,33 @@ app.post('/api/init-payment', async (req, res) => {
       return res.status(400).json({ error: 'Invalid ticket quantity' })
     }
 
-    /* ===============================
+    const attendeesList =
+      Array.isArray(attendees) && attendees.length > 0
+        ? attendees
+        : [
+            {
+              name: name || "Guest",
+              email: email.toLowerCase(),
+              isBuyer: true,
+            },
+          ];
+
+          const emails = attendeesList.map(a =>
+              a.email.toLowerCase()
+          );
+
+          if (new Set(emails).size !== emails.length) {
+              return res.status(400).json({
+                  error: "Duplicate attendee emails are not allowed."
+              });
+          }
+
+    if (attendeesList.length !== qty) {
+      return res.status(400).json({
+        error: "Attendee count does not match ticket quantity."
+      });
+    }
+/* ===============================
        2. FETCH EVENT
     =============================== */
     const eventSnap = await db.collection('events').doc(eventId).get()
@@ -335,77 +362,166 @@ app.post('/api/init-payment', async (req, res) => {
     if (totalAmount === 0 || event.isFree === true) {
       const freeReference = `FREE-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
       const organizerId = event.ownerId
-      const ticketRef = db.collection('tickets').doc(freeReference)
+      const ticketIds = [];
 
-      // 1. Atomic transaction to issue ticket and update analytics counters
-      await db.runTransaction(async tx => {
-        tx.set(eventSnap.ref, {
-          ticketSold: admin.firestore.FieldValue.increment(qty),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true })
+   await db.runTransaction(async (tx) => {
 
-        tx.set(ticketRef, {
-          reference: freeReference,
-          organizerId,
-          userId: userId || null,
-          eventId,
-          eventName: event.name,
-          ticketNumber: qty,
-          ticketType: ticketLabel,
-          location: event.location || 'TBA',
-          amount: 0,
-          status: 'success',
-          used: false,
-          email: email.toLowerCase().trim(),
-          buyerName: name || 'Guest',
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        })
-      })
+    tx.set(eventSnap.ref,{
+        ticketSold: admin.firestore.FieldValue.increment(qty),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    },{ merge:true });
 
-      // 2. Generate the visual pass QR asset code
-      const qrUrl = `${process.env.FRONTEND_URL}/ticket/${ticketRef.id}`;
-        
-      const qrData = await QRCode.toDataURL(qrUrl, {
-        width: 320,
-        margin: 1,
-        errorCorrectionLevel: "M",
-      });
+    for (const [index, attendee] of attendeesList.entries()) {
+        const ticketRef = db.collection("tickets").doc();
+        const ticketId = ticketRef.id;
 
-      const qrBase64 = qrData.replace(/^data:image\/png;base64,/, '')
-      await ticketRef.update({ qr: qrBase64 })
+        const qrUrl = `${process.env.FRONTEND_URL}/ticket/${ticketId}`;
+        const qrData = await QRCode.toDataURL(qrUrl,{
+            width:320,
+            margin:1,
+            errorCorrectionLevel:"M",
+        });
 
+        const qrBase64 = qrData.replace(
+            /^data:image\/png;base64,/,
+            ""
+        );
+
+        tx.set(ticketRef,{
+            ticketId,
+            reference: freeReference,
+            parentReference: freeReference,
+            ticketIndex:index,
+            organizerId,
+            userId:userId || null,
+            eventId,
+            eventName:event.name,
+            ticketType:ticketLabel,
+            location:event.location || "TBA",
+            amount:0,
+            buyerName: attendee.name,
+            email: attendee.email.toLowerCase(),
+
+            attendeeName: attendee.name,
+            attendeeEmail: attendee.email.toLowerCase(),
+
+            purchaserName: name,
+            purchaserEmail: email.toLowerCase(),
+            totalTickets: attendeesList.length,
+
+            isBuyer: attendee.isBuyer,
+            qr:qrBase64,
+            status:"success",
+            used:false,
+            createdAt:admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        ticketIds.push({
+            ticketId,
+            attendee
+        });
+    }
+  });
       // 3. Dispatch the ticket via Brevo immediately (Non-blocking worker thread)
       setImmediate(async () => {
-        try {
-          const emailPayload = new Brevo.SendSmtpEmail()
-          emailPayload.subject = `🎫 Your Free Pass Confirmation: ${event.name}`
-          emailPayload.sender = { name: 'Airticks Events', email: process.env.EMAIL_FROM }
-          emailPayload.to = [{ email: email.toLowerCase().trim(), name: name || 'Guest' }]
-          emailPayload.attachment = [{ name: 'ticket-qr.png', content: qrBase64 }]
-          emailPayload.htmlContent = `
-            <div style="font-family: Arial, sans-serif; max-width:600px; margin:auto; padding:20px; border:1px solid #eee; border-radius:12px;">
-              <h2 style="text-align:center; color:#16a34a;">🎉 Free Registration Confirmed!</h2>
-              <p>Hello ${name || 'Guest'},</p>
-              <p>Your free ticket pass for <b>${event.name}</b> is confirmed.</p>
-              <table style="width:100%; margin:16px 0;">
-                <tr><td><b>Ticket Reference</b></td><td>${freeReference}</td></tr>
-                <tr><td><b>Quantity Passed</b></td><td>${qty} Ticket(s)</td></tr>
-                <tr><td><b>Ticket Tier</b></td><td>${ticketLabel}</td></tr>
-                <tr><td><b>Price</b></td><td style="color:green; font-weight:bold;">FREE</td></tr>
+        for (const { ticketId, attendee } of ticketIds) {
+          try {
+            const ticketSnap = await db.collection("tickets").doc(ticketId).get();
+
+            if (!ticketSnap.exists) continue;
+
+            const ticket = ticketSnap.data();
+
+            const emailPayload = new Brevo.SendSmtpEmail();
+
+            emailPayload.subject = `🎫 Your Free Ticket for ${event.name}`;
+
+            emailPayload.sender = {
+              name: "Airticks Events",
+              email: process.env.EMAIL_FROM,
+            };
+
+            emailPayload.to = [
+              {
+                email: ticket.email,
+                name: ticket.buyerName,
+              },
+            ];
+
+            emailPayload.attachment = [
+              {
+                name: "ticket-qr.png",
+                content: ticket.qr,
+              },
+            ];
+
+            const intro = ticket.isBuyer
+              ? `
+                  <p>Your free registration for <b>${event.name}</b> has been confirmed.</p>
+
+                  <p>Your personal ticket is attached below.</p>
+                `
+              : `
+                  <p><strong>${ticket.purchaserName}</strong> has registered you for <b>${event.name}</b>.</p>
+
+                  <p>This QR code belongs only to you.</p>
+                `;
+
+            emailPayload.htmlContent = `
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;border:1px solid #eee;border-radius:12px;">
+
+              <h2 style="text-align:center;color:#16a34a;">
+                  🎉 Free Ticket Confirmed
+              </h2>
+
+              <p>Hello <strong>${ticket.buyerName}</strong>,</p>
+
+              ${intro}
+
+              <div style="text-align:center;margin:20px 0;">
+                  <img src="data:image/png;base64,${ticket.qr}" width="220"/>
+              </div>
+
+              <table style="width:100%;border-collapse:collapse;">
+
+                  <tr>
+                      <td><strong>Event</strong></td>
+                      <td>${event.name}</td>
+                  </tr>
+
+                  <tr>
+                      <td><strong>Ticket Type</strong></td>
+                      <td>${ticket.ticketType}</td>
+                  </tr>
+
+                  <tr>
+                      <td><strong>Price</strong></td>
+                      <td style="color:green;font-weight:bold;">FREE</td>
+                  </tr>
+
+                  <tr>
+                      <td><strong>Reference</strong></td>
+                      <td>${ticketId}</td>
+                  </tr>
+
               </table>
-              <p style="text-align:center;">
-                <img src="data:image/png;base64,${qrBase64}" width="200" />
+
+              <p style="font-size:12px;color:#777;text-align:center;margin-top:20px;">
+                  Please present this QR code at the event entrance.
               </p>
-              <p style="font-size:12px; color:#777; text-align:center;">
-                Present this QR code at the event gate checkpoint layout for entrance access validation.
-              </p>
+
             </div>
-          `
-          await emailApi.sendTransacEmail(emailPayload)
-        } catch (emailErr) {
-          console.error('❌ Brevo background worker free ticket email error:', emailErr)
-        }
-      })
+            `;
+
+            await emailApi.sendTransacEmail(emailPayload);
+
+            console.log("✅ Free ticket email sent:", ticket.email);
+
+          } catch (err) {
+            console.error("❌ Free ticket email error:", attendee.email, err);
+          }
+          }
+        });
 
       // 4. Return success to the frontend instantly so it knows there's no redirect URL needed
       return res.json({
@@ -449,7 +565,8 @@ app.post('/api/init-payment', async (req, res) => {
             ticketNumber: qty,
             platform: 'airticks',
             userId: userId || null,
-            fullName: name
+            fullName: name,
+            attendees: attendeesList,// Pass attendee list if provided
           }
         })
       }
@@ -510,13 +627,17 @@ app.post('/api/webhook/paystack', async (req, res) => {
       /* =========================
          PREVENT DUPLICATES
       ========================== */
-      const existing = await db
-        .collection('tickets')
+      // Prevent duplicate webhook processing
+      const existingWalletTx = await db
+        .collection('wallet_transactions')
         .where('reference', '==', reference)
         .limit(1)
         .get()
 
-      if (!existing.empty) return res.sendStatus(200)
+      if (!existingWalletTx.empty) {
+        console.log('⚠️ Duplicate webhook for reference:', reference)
+        return res.sendStatus(200)
+      }
 
       /* =========================
          FETCH EVENT
@@ -527,94 +648,129 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
       const eventDoc = eventSnap.data()
       const organizerId = eventDoc.ownerId
-
-      const platformWalletRef = db.collection('wallets').doc('platform')
-      const organizerWalletRef = db.collection('wallets').doc(organizerId)
-      const ticketRef = db.collection('tickets').doc(reference)
-
       const ticketQty = Number(metadata.ticketNumber) || 1
 
       /* =========================
-         FIRESTORE TRANSACTION
+         DETERMINE ATTENDEES LIST
       ========================== */
+      // If attendees were provided, use them. Otherwise, create single attendee from buyer
+      const attendeesList =
+          Array.isArray(metadata.attendees) &&
+          metadata.attendees.length > 0
+              ? metadata.attendees
+              : [
+                  {
+                      name: metadata.fullName || customer.name || "Guest",
+                      email: customer.email,
+                      isBuyer: true,
+                  },
+              ];
+
+        const emails = attendeesList.map(a =>
+              a.email.toLowerCase()
+          );
+
+          if (new Set(emails).size !== emails.length) {
+              return res.status(400).json({
+                  error: "Duplicate attendee emails are not allowed."
+              });
+          }
+
+      /* ============================================================
+         ⚡ PERFORMANCE OPTIMIZATION: PRE-GENERATE TICKET IDS & QR CODES
+         (Keeps the Firestore Transaction lightweight and deterministic)
+      ============================================================ */
+      const preparedTickets = [];
+      const ticketIds = [];
+
+      for (const [index, attendee] of attendeesList.entries()) {
+        const ticketRef = db.collection('tickets').doc();
+        const ticketId = ticketRef.id;
+
+        const qrUrl = `${process.env.FRONTEND_URL}/ticket/${ticketId}`;
+        const qrData = await QRCode.toDataURL(qrUrl, {
+          width: 320,
+          margin: 1,
+          errorCorrectionLevel: "M",
+        });
+        const qrBase64 = qrData.replace(/^data:image\/png;base64,/, '');
+
+        preparedTickets.push({
+          ticketRef,
+          ticketId,
+          index,
+          attendee,
+          qrBase64
+        });
+
+        ticketIds.push({ ticketId, attendee });
+      }
+
+      /* ============================================================
+         💼 TRANSACTION WORKFLOW (WALLETS, COUNT, & DATA WRITE)
+      ============================================================ */
       await db.runTransaction(async tx => {
-        const platformSnap = await tx.get(platformWalletRef)
-        const organizerSnap = await tx.get(organizerWalletRef)
+        const platformWalletRef = db.collection('wallets').doc('platform');
+        const organizerWalletRef = db.collection('wallets').doc(organizerId);
 
-        // PLATFORM (real money)
-        tx.set(
-          platformWalletRef,
-          {
-            balance: (platformSnap.data()?.balance || 0) + platformFee,
-            totalEarned: (platformSnap.data()?.totalEarned || 0) + platformFee,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          },
-          { merge: true }
-        )
 
-        // ORGANIZER (pending only)
-        tx.set(
-          organizerWalletRef,
-          {
-            pendingBalance:
-              (organizerSnap.data()?.pendingBalance || 0) + organizerAmount,
-            totalEarned:
-              (organizerSnap.data()?.totalEarned || 0) + organizerAmount,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          },
-          { merge: true }
-        )
+        // Update Wallet Metrics
+        tx.set(platformWalletRef, {
+          balance: increment(platformFee),
+          totalRevenue: admin.firestore.FieldValue.increment(platformFee),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
 
-        // EVENT STATS (NO MONEY)
-        tx.set(
-          eventRef,
-          {
-            ticketSold: admin.firestore.FieldValue.increment(
-              Number(metadata.ticketNumber)
-            ),
-            grossRevenue: admin.firestore.FieldValue.increment(paidAmount),
-            organizerRevenue:
-              admin.firestore.FieldValue.increment(organizerAmount),
-            platformRevenue: admin.firestore.FieldValue.increment(platformFee),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          },
-          { merge: true }
-        )
+        tx.set(organizerWalletRef, {
+          pendingBalance: admin.firestore.FieldValue.increment(organizerAmount),
+          totalEarnings: admin.firestore.FieldValue.increment(organizerAmount),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
 
-        // TICKET
-        tx.set(ticketRef, {
-          reference,
-          organizerId,
-          userId: metadata.userId || null,
-          eventId: metadata.eventId,
-          eventName: eventDoc.name,
-          ticketNumber: ticketQty,
-          ticketType: metadata.ticketLabel || 'Default Label',
-          location: eventDoc.location || 'TBA',
-          amount: paidAmount,
-          status: 'success',
-          used: false,
-          email: customer.email,
-          buyerName: metadata.fullName || customer.name || 'Guest',
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        })
-      })
+        // Update Event Ticket metrics
+        tx.set(eventRef, {
+          ticketSold: admin.firestore.FieldValue.increment(ticketQty),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
 
-      /* =========================
-         QR CODE
-      ========================== */
-      const qrUrl = `${process.env.FRONTEND_URL}/ticket/${ticketRef.id}`;
+        // Write batch tickets
+        for (const item of preparedTickets) {
+          tx.set(item.ticketRef, {
+            ticketId: item.ticketId,
+            reference,
+            parentReference: reference,
+            ticketIndex: item.index,
 
-      const qrData = await QRCode.toDataURL(qrUrl, {
-        width: 320,
-        margin: 1,
-        errorCorrectionLevel: "M",
+            organizerId,
+            userId: metadata.userId || null,
+
+            eventId: metadata.eventId,
+            eventName: eventDoc.name,
+            ticketType: metadata.ticketLabel,
+            location: eventDoc.location || "TBA",
+
+            amount: paidAmount / attendeesList.length,
+
+            // Unified field naming matching frontend lookups & verification schemas
+            buyerName: item.attendee.name,
+            email: item.attendee.email.toLowerCase(),
+
+            attendeeName: item.attendee.name,
+            attendeeEmail: item.attendee.email.toLowerCase(),
+
+            purchaserName: metadata.fullName || customer.name || "Guest",
+            purchaserEmail: customer.email.toLowerCase(),
+
+            isBuyer: item.attendee.isBuyer || false,
+
+            qr: item.qrBase64,
+            status: "success",
+            used: false,
+
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
       });
-
-      // remove prefix ONCE
-      const qrBase64 = qrData.replace(/^data:image\/png;base64,/, '')
-
-      await ticketRef.update({ qr: qrBase64 })
 
       /* =========================
          WALLET LEDGER
@@ -631,82 +787,131 @@ app.post('/api/webhook/paystack', async (req, res) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       })
 
-await db.collection('notifications').add({
-  type: 'ticket_purchase',
-  title: '🎫 New Ticket Sold',
-  message: `${metadata.fullName || 'Someone'} bought ${ticketQty} ticket(s) for ${eventDoc.name}`,
-  userId: organizerId,
-  actorId: customer.email,
-  eventId: metadata.eventId,
-  location: eventDoc.location || 'TBA',
-  amount: paidAmount, // Cleaned Nairas decimal number
-  reference: reference, // Tied safely to payload reference variable 
-  read: false,
-  createdAt: admin.firestore.FieldValue.serverTimestamp()
-})
-
-      /* =========================
-         EMAIL (NON-BLOCKING)
-      ========================== */
-      setImmediate(async () => {
-        try {
-          const email = new Brevo.SendSmtpEmail()
-
-          email.subject = '🎫 Your Ticket Confirmation'
-
-          email.sender = {
-            name: 'Airticks Event',
-            email: process.env.EMAIL_FROM
-          }
-
-          email.to = [
-            {
-              email: customer.email,
-              name: metadata.fullName || 'Guest'
-            }
-          ]
-
-          email.attachment = [
-            {
-              name: 'ticket-qr.png',
-              content: qrBase64
-            }
-          ]
-
-          email.htmlContent = `
-            <div style="font-family: Arial, sans-serif; max-width:600px; margin:auto; padding:20px; border:1px solid #eee; border-radius:12px;">
-              <h2 style="text-align:center;">🎉 Ticket Confirmed!</h2>
-              <p>Hello ${metadata.fullName || 'Guest'},</p>
-
-              <p>Your ticket for <b>${
-                eventDoc.name
-              }</b> has been successfully confirmed.</p>
-
-              <table style="width:100%; margin:16px 0;">
-                <tr><td><b>Reference</b></td><td>${reference}</td></tr>
-                <tr><td><b>Tickets</b></td><td>${
-                  metadata.ticketNumber
-                }</td></tr>
-                <tr><td><b>Amount</b></td><td>₦${paidAmount}</td></tr>
-                <tr><td><b>Status</b></td><td style="color:green;">SUCCESS</td></tr>
-              </table>
-
-              <p style="text-align:center;">
-                <img src="data:image/png;base64,${qrBase64}" width="200" />
-              </p>
-
-              <p style="font-size:12px; color:#777; text-align:center;">
-                Scan this QR code at the event entrance.
-              </p>
-            </div>
-          `
-
-          await emailApi.sendTransacEmail(email)
-          console.log('📧 Email sent to', customer.email)
-        } catch (err) {
-          console.error('❌ Brevo email error:', err?.response?.body || err)
-        }
+      await db.collection('notifications').add({
+        type: 'ticket_purchase',
+        title: '🎫 New Tickets Sold',
+        message: `${metadata.fullName || 'Someone'} bought ${ticketQty} ticket(s) for ${eventDoc.name}`,
+        userId: organizerId,
+        actorId: customer.email,
+        eventId: metadata.eventId,
+        location: eventDoc.location || 'TBA',
+        amount: paidAmount,
+        reference: reference,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
       })
+
+      // Send emails with QR codes to all attendees (non-blocking)
+      setImmediate(async () => {
+        for (const { ticketId, attendee } of ticketIds) {
+          try {
+            const ticketSnap = await db.collection("tickets").doc(ticketId).get();
+            if (!ticketSnap.exists) continue;
+
+            const ticket = ticketSnap.data();
+
+            const emailPayload = new Brevo.SendSmtpEmail();
+            emailPayload.subject = `🎫 Your Ticket for ${eventDoc.name}`;
+            emailPayload.sender = {
+              name: "Airticks Events",
+              email: process.env.EMAIL_FROM,
+            };
+
+            emailPayload.to = [
+              {
+                email: ticket.email,
+                name: ticket.buyerName,
+              },
+            ];
+
+            emailPayload.attachment = [
+              {
+                name: "ticket-qr.png",
+                content: ticket.qr,
+              },
+            ];
+
+            const intro = ticket.isBuyer
+              ? `
+                <p>Thank you for purchasing your ticket${ticketQty > 1 ? "s" : ""} for <b>${eventDoc.name}</b>.</p>
+                <p>Your personal ticket is attached below.</p>
+              `
+              : `
+                <p><strong>${metadata.fullName}</strong> has purchased this ticket for you to attend <b>${eventDoc.name}</b>.</p>
+                <p>This ticket is registered in your name and the QR code below is for your entry only.</p>
+              `;
+
+            emailPayload.htmlContent = `
+              <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;border:1px solid #eee;border-radius:12px;">
+
+                <h2 style="text-align:center;">🎟 Your Ticket is Ready!</h2>
+
+                <p>Hello <strong>${ticket.buyerName}</strong>,</p>
+
+                ${intro}
+
+                <div style="text-align:center;margin:20px 0;">
+                  <img
+                    src="data:image/png;base64,${ticket.qr}"
+                    width="250"
+                    style="border:2px solid #ff8c00;padding:10px;border-radius:8px;"
+                  />
+                </div>
+
+                <table style="width:100%;border-collapse:collapse;">
+                  <tr>
+                    <td><strong>Attendee</strong></td>
+                    <td>${ticket.buyerName}</td>
+                  </tr>
+
+                  ${
+                    !ticket.isBuyer
+                      ? `
+                      <tr>
+                        <td><strong>Purchased By</strong></td>
+                        <td>${metadata.fullName}</td>
+                      </tr>
+                    `
+                      : ""
+                  }
+
+                  <tr>
+                    <td><strong>Event</strong></td>
+                    <td>${eventDoc.name}</td>
+                  </tr>
+
+                  <tr>
+                    <td><strong>Location</strong></td>
+                    <td>${ticket.location}</td>
+                  </tr>
+
+                  <tr>
+                    <td><strong>Ticket Reference</strong></td>
+                    <td>${ticketId}</td>
+                  </tr>
+                </table>
+
+                <p style="margin-top:20px;font-size:12px;color:#777;text-align:center;">
+                  ⏰ Please arrive at least 15 minutes before the event starts and present this QR code at the entrance.
+                </p>
+
+              </div>
+            `;
+
+            await emailApi.sendTransacEmail(emailPayload);
+
+            console.log(`📧 Ticket email sent to ${ticket.email}`);
+          } catch (emailErr) {
+            console.error(
+              "❌ Error sending ticket email to",
+              attendee.email,
+              emailErr
+            );
+          }
+        }
+      });
+
+      console.log(`✅ Created ${attendeesList.length} individual ticket(s) with QR codes`)
     }
 
     return res.sendStatus(200)
@@ -715,6 +920,7 @@ await db.collection('notifications').add({
     return res.sendStatus(500)
   }
 })
+
 
 
 app.post("/api/tickets/verify", async (req, res) => {
@@ -785,10 +991,13 @@ app.post("/api/tickets/verify", async (req, res) => {
 
     res.json({
       success: true,
-      buyerName: ticket.buyerName,
+      attendeeName: ticket.attendeeName,
+      purchaserName: ticket.purchaserName,
       eventName: ticket.eventName,
       ticketType: ticket.ticketType,
       ticketNumber: ticket.ticketNumber,
+      used: ticket.used,
+      scannedByName: ticket.scannedByName || null,
     });
 
   } catch (err) {
@@ -818,7 +1027,8 @@ app.get("/api/tickets/:ticketId", async (req, res) => {
     const ticket = ticketDoc.data();
 
     res.json({
-      buyerName: ticket.buyerName,
+      attendeeName: ticket.attendeeName,
+      purchaserName: ticket.purchaserName,
       eventName: ticket.eventName,
       ticketType: ticket.ticketType,
       ticketNumber: ticket.ticketNumber,
