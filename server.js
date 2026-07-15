@@ -112,7 +112,7 @@ app.post("/send-message", async (req, res) => {
 
 app.post("/api/description", async (req, res) => {
   try {
-    const { name, category, location, description } = req.body;
+    const { name, category, venue, description } = req.body;
 
     const prompt = `
 You are an event marketing expert.
@@ -120,7 +120,7 @@ Improve this event description.
 
 Event Name: ${name}
 Category: ${category}
-Location: ${location}
+Location: ${venue}
 
 Current Description:
 ${description}
@@ -134,7 +134,7 @@ Rules:
 - Do NOT use headings.
 - Do NOT use quotation marks.
 - Do NOT add labels like "Description:".
-- Keep it under 100 words.
+- Keep it under 300 words.
 - Make it sound human and exciting.
 - Write it as one or two natural paragraphs.
 - Start directly with the description.
@@ -363,14 +363,26 @@ app.post('/api/init-payment', async (req, res) => {
     /* ===============================
        1. READ & VALIDATE INPUT
     =============================== */
-    const { name, email, eventId, ticketLabel, ticketNumber, userId, attendees = [] } = req.body
+const {
+    name,
+    email,
+    eventId,
+    ticketId,
+    ticketName,
+    ticketType,
+    ticketCurrency,
+    ticketQuantity,
+    ticketPrice,
+    userId,
+    attendees = []
+} = req.body;
 
 
-    if (!email || !eventId || !ticketLabel) {
+    if (!email || !eventId || !ticketId || !ticketName || !ticketType || !ticketCurrency || ticketPrice === undefined) {
       return res.status(400).json({ error: 'Missing required fields' })
     }
 
-    const qty = Number(ticketNumber)
+    const qty = Number(ticketQuantity);
     if (!Number.isInteger(qty) || qty <= 0) {
       return res.status(400).json({ error: 'Invalid ticket quantity' })
     }
@@ -410,16 +422,18 @@ app.post('/api/init-payment', async (req, res) => {
     }
 
     const event = eventSnap.data()
+    console.log(event);
 
     /* ===============================
        3. FIND TICKET
     =============================== */
-    const ticket = event.price?.find(t => t.label === ticketLabel)
+const ticket = (event.price ?? event.tickets ?? []).find(
+    t => t.id === ticketId
+);
     if (!ticket) {
       return res.status(400).json({ error: 'Ticket type not found on this event' })
     }
 
-    const ticketPrice = Number(ticket.amount)
     if (isNaN(ticketPrice) || ticketPrice < 0) {
       return res.status(400).json({ error: 'Invalid ticket price configuration' })
     }
@@ -434,12 +448,30 @@ app.post('/api/init-payment', async (req, res) => {
       const organizerId = event.ownerId
       const ticketIds = [];
 
-   await db.runTransaction(async (tx) => {
+      const ticketList =
+      Array.isArray(event.tickets)
+      ? event.tickets
+      : Array.isArray(event.price)
+      ? event.price
+      : [];
 
-    tx.set(eventSnap.ref,{
+      const ticket =
+      ticketList.find(t=>t.id===ticketId);
+
+      const updatedTickets = ticketList.map(t => {
+          if (t.id !== ticketId) return t;
+
+          return {
+              ...t,
+              sold: (t.sold || 0) + qty
+          };
+      });
+      await db.runTransaction(async (tx) => {
+        tx.set(eventSnap.ref,{
+        price: updatedTickets,
         ticketSold: admin.firestore.FieldValue.increment(qty),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    },{ merge:true });
+        },{ merge:true });
 
     for (const [index, attendee] of attendeesList.entries()) {
         const ticketRef = db.collection("tickets").doc();
@@ -466,7 +498,8 @@ app.post('/api/init-payment', async (req, res) => {
             userId:userId || null,
             eventId,
             eventName:event.name,
-            ticketType:ticketLabel,
+            ticketType:ticketName,
+            currency: ticket.currency,
             location:event.location || "TBA",
             amount:0,
             buyerName: attendee.name,
@@ -478,7 +511,8 @@ app.post('/api/init-payment', async (req, res) => {
             purchaserName: name,
             purchaserEmail: email.toLowerCase(),
             totalTickets: attendeesList.length,
-
+            ticketQuantity: qty,
+            maxPerPerson: ticket.maxPerPerson,
             isBuyer: attendee.isBuyer,
             qr:qrBase64,
             status:"success",
@@ -614,7 +648,7 @@ app.post('/api/init-payment', async (req, res) => {
       return res.status(400).json({ error: 'Amount too low for Paystack channels processing.' })
     }
 
-    console.log('🧾 Processing Paid Ticket Checkout Routing:', ticketLabel)
+    console.log('🧾 Processing Paid Ticket Checkout Routing:', ticketName)
 
     const paystackRes = await fetch(
       'https://api.paystack.co/transaction/initialize',
@@ -631,7 +665,10 @@ app.post('/api/init-payment', async (req, res) => {
           callback_url: `${process.env.FRONTEND_URL}/payment-success`,
           metadata: {
             eventId,
-            ticketLabel,
+            ticketId,
+            ticketName,
+            ticketPrice,
+            ticketCurrency,
             ticketNumber: qty,
             platform: 'airticks',
             userId: userId || null,
@@ -786,7 +823,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
         // Update Wallet Metrics
         tx.set(platformWalletRef, {
-          balance: increment(platformFee),
+          balance: admin.firestore.FieldValue.increment(platformFee),
           totalRevenue: admin.firestore.FieldValue.increment(platformFee),
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
@@ -803,6 +840,23 @@ app.post('/api/webhook/paystack', async (req, res) => {
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
 
+        const ticketField = eventDoc.tickets ? "tickets" : "price";
+
+        const ticketList = eventDoc[ticketField] || [];
+
+        const updatedTickets = ticketList.map(t => {
+            if (t.id !== metadata.ticketId) return t;
+
+            return {
+                ...t,
+                sold: (t.sold || 0) + ticketQty,
+            };
+        });
+
+        tx.update(eventRef, {
+            [ticketField]: updatedTickets,
+        });
+
         // Write batch tickets
         for (const item of preparedTickets) {
           tx.set(item.ticketRef, {
@@ -816,10 +870,13 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
             eventId: metadata.eventId,
             eventName: eventDoc.name,
-            ticketType: metadata.ticketLabel,
+            ticketType: metadata.ticketName,
+            ticketQuantity:ticketQty,
+            totalTickets:attendeesList.length,
             location: eventDoc.location || "TBA",
+            currency:metadata.ticketCurrency,
 
-            amount: paidAmount / attendeesList.length,
+            amount: Number(metadata.ticketPrice || 0),
 
             // Unified field naming matching frontend lookups & verification schemas
             buyerName: item.attendee.name,
@@ -832,6 +889,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
             purchaserEmail: customer.email.toLowerCase(),
 
             isBuyer: item.attendee.isBuyer || false,
+            organizer: eventDoc.organizer,
 
             qr: item.qrBase64,
             status: "success",
