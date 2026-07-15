@@ -427,11 +427,18 @@ const {
     /* ===============================
        3. FIND TICKET
     =============================== */
-const ticket = (event.price ?? event.tickets ?? []).find(
-    t => t.id === ticketId
-);
+    const ticketList = Array.isArray(event.tickets)
+        ? event.tickets
+        : Array.isArray(event.price)
+        ? event.price
+        : [];
+
+    const ticket = ticketList.find(t => t.id === ticketId);
+
     if (!ticket) {
-      return res.status(400).json({ error: 'Ticket type not found on this event' })
+        return res.status(400).json({
+            error: "Ticket type not found"
+        });
     }
 
     if (isNaN(ticketPrice) || ticketPrice < 0) {
@@ -448,15 +455,9 @@ const ticket = (event.price ?? event.tickets ?? []).find(
       const organizerId = event.ownerId
       const ticketIds = [];
 
-      const ticketList =
-      Array.isArray(event.tickets)
-      ? event.tickets
-      : Array.isArray(event.price)
-      ? event.price
-      : [];
-
-      const ticket =
-      ticketList.find(t=>t.id===ticketId);
+      const ticketField = Array.isArray(event.tickets)
+      ? "tickets"
+      : "price";
 
       const updatedTickets = ticketList.map(t => {
           if (t.id !== ticketId) return t;
@@ -468,7 +469,7 @@ const ticket = (event.price ?? event.tickets ?? []).find(
       });
       await db.runTransaction(async (tx) => {
         tx.set(eventSnap.ref,{
-        price: updatedTickets,
+        [ticketField]: updatedTickets,
         ticketSold: admin.firestore.FieldValue.increment(qty),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
         },{ merge:true });
