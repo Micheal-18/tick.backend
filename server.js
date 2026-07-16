@@ -468,11 +468,17 @@ const {
           };
       });
       await db.runTransaction(async (tx) => {
+
+
+        const currentCount = event.attendeeCount || 0;
+
         tx.set(eventSnap.ref,{
+        attendeeCount: currentCount + qty,
         [ticketField]: updatedTickets,
         ticketSold: admin.firestore.FieldValue.increment(qty),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
         },{ merge:true });
+
 
     for (const [index, attendee] of attendeesList.entries()) {
         const ticketRef = db.collection("tickets").doc();
@@ -490,6 +496,8 @@ const {
             ""
         );
 
+        const attendeeNumber = currentCount + index + 1;
+
         tx.set(ticketRef,{
             ticketId,
             reference: freeReference,
@@ -501,13 +509,15 @@ const {
             eventName:event.name,
             ticketType:ticketName,
             currency: ticket.currency,
-            location:event.location || "TBA",
+            location:event.venue.name || "TBA",
+            map: event.venue.map,
             amount:0,
             buyerName: attendee.name,
             email: attendee.email.toLowerCase(),
 
             attendeeName: attendee.name,
             attendeeEmail: attendee.email.toLowerCase(),
+            attendeeNumber,
 
             purchaserName: name,
             purchaserEmail: email.toLowerCase(),
@@ -539,7 +549,7 @@ const {
 
             const emailPayload = new Brevo.SendSmtpEmail();
 
-            emailPayload.subject = `🎫 Your Free Ticket for ${event.name}`;
+            emailPayload.subject = `🧩 Congratulations, You're ${event.name} certified `;
 
             emailPayload.sender = {
               name: "Airticks Events",
@@ -562,13 +572,15 @@ const {
 
             const intro = ticket.isBuyer
               ? `
-                  <p>Your free registration for <b>${event.name}</b> has been confirmed.</p>
+                  <p>Your free ticket to <b>${event.name}</b> experience is ready.</p>
 
                   <p>Your personal ticket is attached below.</p>
+                  <p>Ticket Number: ${ticket.attendeeNumber} </p>
                 `
               : `
                   <p><strong>${ticket.purchaserName}</strong> has registered you for <b>${event.name}</b>.</p>
-
+                  <p>Ticket Number: ${ticket.attendeeNumber} </p>
+                  
                   <p>This QR code belongs only to you.</p>
                 `;
 
@@ -576,7 +588,7 @@ const {
             <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;border:1px solid #eee;border-radius:12px;">
 
               <h2 style="text-align:center;color:#16a34a;">
-                  🎉 Free Ticket Confirmed
+                🧩 Free Ticket Confirmed
               </h2>
 
               <p>Hello <strong>${ticket.buyerName}</strong>,</p>
@@ -590,22 +602,27 @@ const {
               <table style="width:100%;border-collapse:collapse;">
 
                   <tr>
-                      <td><strong>Event</strong></td>
+                      <td><strong>Event:</strong></td>
                       <td>${event.name}</td>
                   </tr>
 
                   <tr>
-                      <td><strong>Ticket Type</strong></td>
+                      <td><strong>Ticket Type:</strong></td>
                       <td>${ticket.ticketType}</td>
                   </tr>
 
                   <tr>
-                      <td><strong>Price</strong></td>
+                      <td><strong>Direction:</strong></td>
+                      <td>${ticket.map}</td>
+                  </tr>
+
+                  <tr>
+                      <td><strong>Price:</strong></td>
                       <td style="color:green;font-weight:bold;">FREE</td>
                   </tr>
 
                   <tr>
-                      <td><strong>Reference</strong></td>
+                      <td><strong>Reference:</strong></td>
                       <td>${ticketId}</td>
                   </tr>
 
@@ -821,6 +838,8 @@ app.post('/api/webhook/paystack', async (req, res) => {
         const platformWalletRef = db.collection('wallets').doc('platform');
         const organizerWalletRef = db.collection('wallets').doc(organizerId);
 
+      const currentCount = eventDoc.attendeeCount || 0;
+
 
         // Update Wallet Metrics
         tx.set(platformWalletRef, {
@@ -855,11 +874,15 @@ app.post('/api/webhook/paystack', async (req, res) => {
         });
 
         tx.update(eventRef, {
+            attendeeCount: currentCount + ticketQty,
             [ticketField]: updatedTickets,
         });
 
         // Write batch tickets
         for (const item of preparedTickets) {
+
+          const attendeeNumber = currentCount + item.index + 1;
+
           tx.set(item.ticketRef, {
             ticketId: item.ticketId,
             reference,
@@ -874,7 +897,8 @@ app.post('/api/webhook/paystack', async (req, res) => {
             ticketType: metadata.ticketName,
             ticketQuantity:ticketQty,
             totalTickets:attendeesList.length,
-            location: eventDoc.location || "TBA",
+            location: eventDoc.venue.name || "TBA",
+            map: eventDoc.venue.map,
             currency:metadata.ticketCurrency,
 
             amount: Number(metadata.ticketPrice || 0),
@@ -885,6 +909,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
             attendeeName: item.attendee.name,
             attendeeEmail: item.attendee.email.toLowerCase(),
+            attendeeNumber,
 
             purchaserName: metadata.fullName || customer.name || "Guest",
             purchaserEmail: customer.email.toLowerCase(),
@@ -940,7 +965,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
             const ticket = ticketSnap.data();
 
             const emailPayload = new Brevo.SendSmtpEmail();
-            emailPayload.subject = `🎫 Your Ticket for ${eventDoc.name}`;
+            emailPayload.subject = `🧩 Congratulations, You're ${eventDoc.name} certified!`;
             emailPayload.sender = {
               name: "Airticks Events",
               email: process.env.EMAIL_FROM,
@@ -964,6 +989,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
               ? `
                 <p>Thank you for purchasing your ticket${ticketQty > 1 ? "s" : ""} for <b>${eventDoc.name}</b>.</p>
                 <p>Your personal ticket is attached below.</p>
+                <p>Ticket No: ${ticket.attendeeNumber}</p>
               `
               : `
                 <p><strong>${metadata.fullName}</strong> has purchased this ticket for you to attend <b>${eventDoc.name}</b>.</p>
@@ -973,7 +999,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
             emailPayload.htmlContent = `
               <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;border:1px solid #eee;border-radius:12px;">
 
-                <h2 style="text-align:center;">🎟 Your Ticket is Ready!</h2>
+                <h2 style="text-align:center;">🧩 Your ticket to the AWTFIL Experience is ready!</h2>
 
                 <p>Hello <strong>${ticket.buyerName}</strong>,</p>
 
@@ -1012,6 +1038,16 @@ app.post('/api/webhook/paystack', async (req, res) => {
                   <tr>
                     <td><strong>Location</strong></td>
                     <td>${ticket.location}</td>
+                  </tr>
+
+                  <tr>
+                    <td><strong>Map</strong></td>
+                    <td>${ticket.map}</td>
+                  </tr>
+
+                  <tr>
+                  <td><strong>TicketType</strong>
+                  <td>${ticket.tickeType}</td>
                   </tr>
 
                   <tr>
