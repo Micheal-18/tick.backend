@@ -588,7 +588,7 @@ const {
             <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;border:1px solid #eee;border-radius:12px;">
 
               <h2 style="text-align:center;color:#16a34a;">
-                🧩 Free Ticket Confirmed
+                🦅 Free Ticket Confirmed
               </h2>
 
               <p>Hello <strong>${ticket.buyerName}</strong>,</p>
@@ -965,7 +965,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
             const ticket = ticketSnap.data();
 
             const emailPayload = new Brevo.SendSmtpEmail();
-            emailPayload.subject = `🧩 Congratulations, You're ${eventDoc.name} certified!`;
+            emailPayload.subject = `🦅 Congratulations, You're ${eventDoc.name} certified!`;
             emailPayload.sender = {
               name: "Airticks Events",
               email: process.env.EMAIL_FROM,
@@ -999,7 +999,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
             emailPayload.htmlContent = `
               <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;border:1px solid #eee;border-radius:12px;">
 
-                <h2 style="text-align:center;">🧩 Your ticket to the AWTFIL Experience is ready!</h2>
+                <h2 style="text-align:center;">🦅 Your ticket to the ${eventDoc.name} Experience is ready!</h2>
 
                 <p>Hello <strong>${ticket.buyerName}</strong>,</p>
 
@@ -1031,17 +1031,17 @@ app.post('/api/webhook/paystack', async (req, res) => {
                   }
 
                   <tr>
-                    <td><strong>Event</strong></td>
+                    <td><strong>Event:</strong></td>
                     <td>${eventDoc.name}</td>
                   </tr>
 
                   <tr>
-                    <td><strong>Location</strong></td>
+                    <td><strong>Location:</strong></td>
                     <td>${ticket.location}</td>
                   </tr>
 
                   <tr>
-                    <td><strong>Map</strong></td>
+                    <td><strong>Direction:</strong></td>
                     <td>${ticket.map}</td>
                   </tr>
 
@@ -1051,7 +1051,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
                   </tr>
 
                   <tr>
-                    <td><strong>Ticket Reference</strong></td>
+                    <td><strong>Ticket Reference:</strong></td>
                     <td>${ticketId}</td>
                   </tr>
                 </table>
