@@ -1047,7 +1047,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
                   <tr>
                   <td><strong>TicketType</strong>
-                  <td>${ticket.tickeType}</td>
+                  <td>${ticket.ticketType}</td>
                   </tr>
 
                   <tr>
