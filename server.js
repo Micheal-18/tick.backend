@@ -10,7 +10,6 @@ import crypto from 'crypto'
 import { GoogleGenAI } from "@google/genai";
 import axios from "axios";
 import nodemailer from "nodemailer";
-import { sendNotification } from '../src/utils/createNotify'
 
 
 
@@ -1353,24 +1352,19 @@ app.get('/api/paystack/settlements', authenticate, async (req, res) => {
         organizerId,
         amount: settlementAmount,
         paidAt
-      });
+      })
 
-      // 5.5 Fetch Organizer Email for Brevo
-      const organizerSnap = await db.collection('users').doc(organizerId).get();
-      const organizerEmail = organizerSnap.data()?.email;
-
-      // 6. Dispatch Notification & Email
-      if (organizerEmail) {
-        await sendNotification({ 
-          userId: organizerId,
-          userEmail: organizerEmail, // 👈 CRITICAL: Brevo needs this
-          title: '💰 Settlement Received',
-          message: `₦${settlementAmount.toLocaleString()} has been settled to your bank.`,
-          link: '/dashboard/organization/wallet'
-        });
-      } else {
-         console.warn(`Could not find email for organizer ${organizerId}`);
-      } 
+      await db.collection('notifications').add({
+        type: 'settlement',
+        title: '💰 Settlement Received',
+        message: `₦${settlementAmount.toLocaleString()} has been settled to your bank`,
+        userId: organizerId,
+        amount: settlementAmount, // <-- FIXED Variable
+        reference: settlementRef, // <-- FIXED Variable
+        link: '/dashboard/organization/wallet',
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      })
     }
 
     // 6️⃣ Response
