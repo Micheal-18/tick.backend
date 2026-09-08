@@ -10,6 +10,7 @@ import crypto from 'crypto'
 import { GoogleGenAI } from "@google/genai";
 import axios from "axios";
 import nodemailer from "nodemailer";
+import { sendNotification } from '../src/utils/createNotify'
 
 
 
@@ -68,6 +69,51 @@ emailApi.authentications['apiKey'].apiKey = process.env.BREVO_API_KEY
    TEST ROUTE
 ======================= */
 app.get('/', (req, res) => res.send('🚀 Airticks backend running'))
+
+
+app.post("/api/notifications/create", authenticate, async (req, res) => {
+  try {
+    const { userId, userEmail, title, message, link } = req.body;
+
+    if (!userId || !userEmail || !message) {
+      return res.status(400).json({ error: "Missing required notification fields" });
+    }
+
+    // 1. Create the in-app notification in Firestore
+    await db.collection("notifications").add({
+      userId,
+      title: title || "New Notification",
+      message,
+      link: link || null,
+      read: false,
+      status: "pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // 2. Fire off the email via Brevo
+    const emailPayload = new Brevo.SendSmtpEmail();
+    emailPayload.subject = title || "New update from AirTicks";
+    emailPayload.sender = {
+      name: "AirTicks",
+      email: process.env.EMAIL_FROM,
+    };
+    emailPayload.to = [{ email: userEmail }];
+    emailPayload.htmlContent = `
+      <div style="font-family:Arial,sans-serif;padding:20px;max-width:600px;margin:auto;border:1px solid #eee;border-radius:12px;">
+        <h2 style="color:#16a34a;">${title || "Update"}</h2>
+        <p>${message}</p>
+        ${link ? `<p><a href="${process.env.FRONTEND_URL}${link}" style="color:#ff8c00;text-decoration:none;font-weight:bold;">View Details &rarr;</a></p>` : ""}
+      </div>
+    `;
+
+    await emailApi.sendTransacEmail(emailPayload);
+
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error("Notification Error:", error);
+    res.status(500).json({ error: "Failed to process notification" });
+  }
+});
 
 app.post("/send-message", async (req, res) => {
   const { name, email, message } = req.body;
@@ -1307,19 +1353,24 @@ app.get('/api/paystack/settlements', authenticate, async (req, res) => {
         organizerId,
         amount: settlementAmount,
         paidAt
-      })
+      });
 
-      await db.collection('notifications').add({
-        type: 'settlement',
-        title: '💰 Settlement Received',
-        message: `₦${settlementAmount.toLocaleString()} has been settled to your bank`,
-        userId: organizerId,
-        amount: settlementAmount, // <-- FIXED Variable
-        reference: settlementRef, // <-- FIXED Variable
-        link: '/dashboard/organization/wallet',
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      })
+      // 5.5 Fetch Organizer Email for Brevo
+      const organizerSnap = await db.collection('users').doc(organizerId).get();
+      const organizerEmail = organizerSnap.data()?.email;
+
+      // 6. Dispatch Notification & Email
+      if (organizerEmail) {
+        await sendNotification({ 
+          userId: organizerId,
+          userEmail: organizerEmail, // 👈 CRITICAL: Brevo needs this
+          title: '💰 Settlement Received',
+          message: `₦${settlementAmount.toLocaleString()} has been settled to your bank.`,
+          link: '/dashboard/organization/wallet'
+        });
+      } else {
+         console.warn(`Could not find email for organizer ${organizerId}`);
+      } 
     }
 
     // 6️⃣ Response
