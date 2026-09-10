@@ -7,15 +7,13 @@ import cors from 'cors'
 import QRCode from 'qrcode'
 import Brevo from '@getbrevo/brevo'
 import crypto from 'crypto'
-import { GoogleGenAI } from "@google/genai";
-import axios from "axios";
-import nodemailer from "nodemailer";
-
-
+import { GoogleGenAI } from '@google/genai'
+import axios from 'axios'
+import nodemailer from 'nodemailer'
 
 const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
+  apiKey: process.env.GEMINI_API_KEY
+})
 
 const app = express()
 app.use(cors())
@@ -69,73 +67,91 @@ emailApi.authentications['apiKey'].apiKey = process.env.BREVO_API_KEY
 ======================= */
 app.get('/', (req, res) => res.send('🚀 Airticks backend running'))
 
-
-app.post("/api/notifications/create", authenticate, async (req, res) => {
+app.post('/api/notifications/create', authenticate, async (req, res) => {
   try {
-    const { userId, userEmail, title, message, link } = req.body;
+    const {
+      userId,
+      userEmail,
+      title,
+      message,
+      link,
+      status,
+      type,
+      senderId,
+      senderName
+    } = req.body
 
     if (!userId || !userEmail || !message) {
-      return res.status(400).json({ error: "Missing required notification fields" });
+      return res
+        .status(400)
+        .json({ error: 'Missing required notification fields' })
     }
 
     // 1. Create the in-app notification in Firestore
-    await db.collection("notifications").add({
+    await db.collection('notifications').add({
       userId,
-      title: title || "New Notification",
+      title: title || 'New Notification',
       message,
       link: link || null,
       read: false,
-      status: "pending",
+      status: status || 'unread', // Defaults to unread, but catches your 'pending'
+      type: type || 'general',
+      senderId: senderId || null,
+      senderName: senderName || null,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+    })
 
     // 2. Fire off the email via Brevo
-    const emailPayload = new Brevo.SendSmtpEmail();
-    emailPayload.subject = title || "New update from AirTicks";
+    const emailPayload = new Brevo.SendSmtpEmail()
+    emailPayload.subject = title || 'New update from AirTicks'
     emailPayload.sender = {
-      name: "AirTicks",
-      email: process.env.EMAIL_FROM,
-    };
-    emailPayload.to = [{ email: userEmail }];
+      name: 'AirTicks',
+      email: process.env.EMAIL_FROM
+    }
+    emailPayload.to = [{ email: userEmail }]
     emailPayload.htmlContent = `
       <div style="font-family:Arial,sans-serif;padding:20px;max-width:600px;margin:auto;border:1px solid #eee;border-radius:12px;">
-        <h2 style="color:#16a34a;">${title || "Update"}</h2>
+        <h2 style="color:#16a34a;">${title || 'Update'}</h2>
         <p>${message}</p>
-        ${link ? `<p><a href="${process.env.FRONTEND_URL}${link}" style="color:#ff8c00;text-decoration:none;font-weight:bold;">View Details &rarr;</a></p>` : ""}
+        ${
+          link
+            ? `<p><a href="${process.env.FRONTEND_URL}${link}" style="color:#ff8c00;text-decoration:none;font-weight:bold;">View Details &rarr;</a></p>`
+            : ''
+        }
       </div>
-    `;
+    `
 
-    await emailApi.sendTransacEmail(emailPayload);
+    await emailApi.sendTransacEmail(emailPayload)
 
-    res.status(200).json({ success: true });
+    res.status(200).json({ success: true })
   } catch (error) {
-    console.error("Notification Error:", error);
-    res.status(500).json({ error: "Failed to process notification" });
+    console.error('Notification Error:', error)
+    res.status(500).json({ error: 'Failed to process notification' })
   }
-});
+})
 
-app.post("/send-message", async (req, res) => {
-  const { name, email, message } = req.body;
+app.post('/send-message', async (req, res) => {
+  const { name, email, message } = req.body
 
   if (!name || !email || !message) {
-    return res.status(400).json({ error: "All fields are required." });
+    return res.status(400).json({ error: 'All fields are required.' })
   }
 
   try {
     // Configure Brevo SMTP
     const transporter = nodemailer.createTransport({
-      host: "smtp-relay.brevo.com",
+      host: 'smtp-relay.brevo.com',
       port: 587,
       auth: {
         user: process.env.BREVO_USER,
-        pass: process.env.BREVO_SMTP_KEY,
-      },
-    });
+        pass: process.env.BREVO_SMTP_KEY
+      }
+    })
 
     // Message details
     const mailOptions = {
       from: `"Airticks Contact" <${process.env.EMAIL_FROM}>`,
-      to: "michaeleleke259@gmail.com", // 👈 your real inbox
+      to: 'michaeleleke259@gmail.com', // 👈 your real inbox
       subject: `New message from ${name}`,
       html: `
         <h2>New Contact Message</h2>
@@ -143,21 +159,23 @@ app.post("/send-message", async (req, res) => {
         <p><strong>Email:</strong> ${email}</p>
         <p><strong>Message:</strong></p>
         <p>${message}</p>
-      `,
-    };
+      `
+    }
 
-    await transporter.sendMail(mailOptions);
-    console.log("✅ Email sent to your inbox");
-    res.status(200).json({ success: true, message: "Message sent successfully!" });
+    await transporter.sendMail(mailOptions)
+    console.log('✅ Email sent to your inbox')
+    res
+      .status(200)
+      .json({ success: true, message: 'Message sent successfully!' })
   } catch (error) {
-    console.error("❌ Error sending email:", error);
-    res.status(500).json({ error: "Failed to send message." });
+    console.error('❌ Error sending email:', error)
+    res.status(500).json({ error: 'Failed to send message.' })
   }
-});
+})
 
-app.post("/api/description", async (req, res) => {
+app.post('/api/description', async (req, res) => {
   try {
-    const { name, category, venue, description } = req.body;
+    const { name, category, venue, description } = req.body
 
     const prompt = `
 You are an event marketing expert.
@@ -183,33 +201,33 @@ Rules:
 - Make it sound human and exciting.
 - Write it as one or two natural paragraphs.
 - Start directly with the description.
-`;
+`
 
     // FIX: Using the correct, globally available text model
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash", 
-      contents: prompt,
-    });
+      model: 'gemini-2.5-flash',
+      contents: prompt
+    })
 
     res.json({
-      description: response.text,
-    });
+      description: response.text
+    })
   } catch (err) {
-    console.error("Description Generation Error:", err);
+    console.error('Description Generation Error:', err)
     res.status(500).json({
-      error: "Failed to generate description.",
-    });
+      error: 'Failed to generate description.'
+    })
   }
-});
+})
 
 // Endpoint 2: Generate Event Flyer Background
-app.post("/api/flyer", async (req, res) => {
+app.post('/api/flyer', async (req, res) => {
   try {
-    const { name, category, description, location, organizer} = req.body;
+    const { name, category, description, location, organizer } = req.body
 
     // Let Gemini improve the prompt
     const promptResponse = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: 'gemini-2.5-flash',
       contents: `
 You are an expert graphic designer.
 
@@ -243,110 +261,107 @@ Requirements:
 - No text
 - No logos
 - Leave empty space for event information
-`,
-    });
+`
+    })
 
     const prompt =
-      typeof promptResponse.text === "function"
+      typeof promptResponse.text === 'function'
         ? promptResponse.text()
-        : promptResponse.text;
+        : promptResponse.text
 
     // Encode the prompt
-    const encodedPrompt = encodeURIComponent(prompt);
+    const encodedPrompt = encodeURIComponent(prompt)
 
     // Pollinations image URL
-    const imageUrl =
-      `https://image.pollinations.ai/prompt/${encodedPrompt}?width=768&height=1024&model=flux&nologo=true`;
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=768&height=1024&model=flux&nologo=true`
     // Download the generated image
     const imageResponse = await axios.get(imageUrl, {
-      responseType: "arraybuffer",
-    });
+      responseType: 'arraybuffer'
+    })
 
     // Convert image to base64
-    const base64 = Buffer.from(imageResponse.data, "binary").toString("base64");
+    const base64 = Buffer.from(imageResponse.data, 'binary').toString('base64')
 
     res.json({
-      image: `data:image/png;base64,${base64}`,
-    });
-
+      image: `data:image/png;base64,${base64}`
+    })
   } catch (err) {
-    console.error(err);
+    console.error(err)
 
     res.status(500).json({
-      error: "Failed to generate flyer.",
-    });
+      error: 'Failed to generate flyer.'
+    })
   }
-});
+})
 
-app.get("/api/banks", async (req, res) => {
+app.get('/api/banks', async (req, res) => {
   try {
     const response = await fetch(
-      "https://api.paystack.co/bank?country=nigeria",
+      'https://api.paystack.co/bank?country=nigeria',
       {
         headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        },
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`
+        }
       }
-    );
+    )
 
-    const data = await response.json();
+    const data = await response.json()
 
     if (!data.status) {
       return res.status(400).json({
-        error: data.message,
-      });
+        error: data.message
+      })
     }
 
-    res.json(data.data);
+    res.json(data.data)
   } catch (err) {
-    console.error(err);
+    console.error(err)
     res.status(500).json({
-      error: "Unable to fetch banks",
-    });
+      error: 'Unable to fetch banks'
+    })
   }
-});
+})
 
-app.post("/api/resolve-account", async (req, res) => {
+app.post('/api/resolve-account', async (req, res) => {
   try {
-    const { accountNumber, bankCode } = req.body;
+    const { accountNumber, bankCode } = req.body
 
     if (!accountNumber || !bankCode) {
       return res.status(400).json({
-        error: "Missing account details",
-      });
+        error: 'Missing account details'
+      })
     }
 
     const response = await fetch(
       `https://api.paystack.co/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`,
       {
         headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        },
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`
+        }
       }
-    );
+    )
 
-    const data = await response.json();
+    const data = await response.json()
 
     if (!data.status) {
       return res.status(400).json({
-        error: data.message,
-      });
+        error: data.message
+      })
     }
 
     res.json({
       accountName: data.data.account_name,
       accountNumber: data.data.account_number,
-      bankId: data.data.bank_id,
-    });
-
+      bankId: data.data.bank_id
+    })
   } catch (err) {
-    console.error(err);
+    console.error(err)
 
     res.status(500).json({
-      error: "Unable to resolve account",
-    });
+      error: 'Unable to resolve account'
+    })
   }
-});
+})
 
 /* =======================
    CREATE PAYSTACK SUBACCOUNT
@@ -408,26 +423,33 @@ app.post('/api/init-payment', async (req, res) => {
     /* ===============================
        1. READ & VALIDATE INPUT
     =============================== */
-const {
-    name,
-    email,
-    eventId,
-    ticketId,
-    ticketName,
-    ticketType,
-    ticketCurrency,
-    ticketQuantity,
-    ticketPrice,
-    userId,
-    attendees = []
-} = req.body;
+    const {
+      name,
+      email,
+      eventId,
+      ticketId,
+      ticketName,
+      ticketType,
+      ticketCurrency,
+      ticketQuantity,
+      ticketPrice,
+      userId,
+      attendees = []
+    } = req.body
 
-
-    if (!email || !eventId || !ticketId || !ticketName || !ticketType || !ticketCurrency || ticketPrice === undefined) {
+    if (
+      !email ||
+      !eventId ||
+      !ticketId ||
+      !ticketName ||
+      !ticketType ||
+      !ticketCurrency ||
+      ticketPrice === undefined
+    ) {
       return res.status(400).json({ error: 'Missing required fields' })
     }
 
-    const qty = Number(ticketQuantity);
+    const qty = Number(ticketQuantity)
     if (!Number.isInteger(qty) || qty <= 0) {
       return res.status(400).json({ error: 'Invalid ticket quantity' })
     }
@@ -437,28 +459,26 @@ const {
         ? attendees
         : [
             {
-              name: name || "Guest",
+              name: name || 'Guest',
               email: email.toLowerCase(),
-              isBuyer: true,
-            },
-          ];
+              isBuyer: true
+            }
+          ]
 
-          const emails = attendeesList.map(a =>
-              a.email.toLowerCase()
-          );
+    const emails = attendeesList.map(a => a.email.toLowerCase())
 
-          if (new Set(emails).size !== emails.length) {
-              return res.status(400).json({
-                  error: "Duplicate attendee emails are not allowed."
-              });
-          }
+    if (new Set(emails).size !== emails.length) {
+      return res.status(400).json({
+        error: 'Duplicate attendee emails are not allowed.'
+      })
+    }
 
     if (attendeesList.length !== qty) {
       return res.status(400).json({
-        error: "Attendee count does not match ticket quantity."
-      });
+        error: 'Attendee count does not match ticket quantity.'
+      })
     }
-/* ===============================
+    /* ===============================
        2. FETCH EVENT
     =============================== */
     const eventSnap = await db.collection('events').doc(eventId).get()
@@ -467,27 +487,29 @@ const {
     }
 
     const event = eventSnap.data()
-    console.log(event);
+    console.log(event)
 
     /* ===============================
        3. FIND TICKET
     =============================== */
     const ticketList = Array.isArray(event.tickets)
-        ? event.tickets
-        : Array.isArray(event.price)
-        ? event.price
-        : [];
+      ? event.tickets
+      : Array.isArray(event.price)
+      ? event.price
+      : []
 
-    const ticket = ticketList.find(t => t.id === ticketId);
+    const ticket = ticketList.find(t => t.id === ticketId)
 
     if (!ticket) {
-        return res.status(400).json({
-            error: "Ticket type not found"
-        });
+      return res.status(400).json({
+        error: 'Ticket type not found'
+      })
     }
 
     if (isNaN(ticketPrice) || ticketPrice < 0) {
-      return res.status(400).json({ error: 'Invalid ticket price configuration' })
+      return res
+        .status(400)
+        .json({ error: 'Invalid ticket price configuration' })
     }
 
     const totalAmount = ticketPrice * qty
@@ -496,67 +518,66 @@ const {
        ⚡ SHORT-CIRCUIT ROUTE FOR FREE TICKETS (0 NAIRA / 0 DOLLARS)
     ============================================================ */
     if (totalAmount === 0 || event.isFree === true) {
-      const freeReference = `FREE-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+      const freeReference = `FREE-${Date.now()}-${crypto
+        .randomBytes(4)
+        .toString('hex')
+        .toUpperCase()}`
       const organizerId = event.ownerId
-      const ticketIds = [];
+      const ticketIds = []
 
-      const ticketField = Array.isArray(event.tickets)
-      ? "tickets"
-      : "price";
+      const ticketField = Array.isArray(event.tickets) ? 'tickets' : 'price'
 
       const updatedTickets = ticketList.map(t => {
-          if (t.id !== ticketId) return t;
+        if (t.id !== ticketId) return t
 
-          return {
-              ...t,
-              sold: (t.sold || 0) + qty
-          };
-      });
-      await db.runTransaction(async (tx) => {
+        return {
+          ...t,
+          sold: (t.sold || 0) + qty
+        }
+      })
+      await db.runTransaction(async tx => {
+        const currentCount = event.attendeeCount || 0
 
+        tx.set(
+          eventSnap.ref,
+          {
+            attendeeCount: currentCount + qty,
+            [ticketField]: updatedTickets,
+            ticketSold: admin.firestore.FieldValue.increment(qty),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          { merge: true }
+        )
 
-        const currentCount = event.attendeeCount || 0;
+        for (const [index, attendee] of attendeesList.entries()) {
+          const ticketRef = db.collection('tickets').doc()
+          const ticketId = ticketRef.id
 
-        tx.set(eventSnap.ref,{
-        attendeeCount: currentCount + qty,
-        [ticketField]: updatedTickets,
-        ticketSold: admin.firestore.FieldValue.increment(qty),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        },{ merge:true });
+          const qrUrl = `${process.env.FRONTEND_URL}/ticket/${ticketId}`
+          const qrData = await QRCode.toDataURL(qrUrl, {
+            width: 320,
+            margin: 1,
+            errorCorrectionLevel: 'M'
+          })
 
+          const qrBase64 = qrData.replace(/^data:image\/png;base64,/, '')
 
-    for (const [index, attendee] of attendeesList.entries()) {
-        const ticketRef = db.collection("tickets").doc();
-        const ticketId = ticketRef.id;
+          const attendeeNumber = currentCount + index + 1
 
-        const qrUrl = `${process.env.FRONTEND_URL}/ticket/${ticketId}`;
-        const qrData = await QRCode.toDataURL(qrUrl,{
-            width:320,
-            margin:1,
-            errorCorrectionLevel:"M",
-        });
-
-        const qrBase64 = qrData.replace(
-            /^data:image\/png;base64,/,
-            ""
-        );
-
-        const attendeeNumber = currentCount + index + 1;
-
-        tx.set(ticketRef,{
+          tx.set(ticketRef, {
             ticketId,
             reference: freeReference,
             parentReference: freeReference,
-            ticketIndex:index,
+            ticketIndex: index,
             organizerId,
-            userId:userId || null,
+            userId: userId || null,
             eventId,
-            eventName:event.name,
-            ticketType:ticketName,
+            eventName: event.name,
+            ticketType: ticketName,
             currency: ticket.currency,
-            location:event.venue.name || "TBA",
+            location: event.venue.name || 'TBA',
             map: event.venue.map,
-            amount:0,
+            amount: 0,
             buyerName: attendee.name,
             email: attendee.email.toLowerCase(),
 
@@ -570,50 +591,53 @@ const {
             ticketQuantity: qty,
             maxPerPerson: ticket.maxPerPerson,
             isBuyer: attendee.isBuyer,
-            qr:qrBase64,
-            status:"success",
-            used:false,
-            createdAt:admin.firestore.FieldValue.serverTimestamp()
-        });
+            qr: qrBase64,
+            status: 'success',
+            used: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          })
 
-        ticketIds.push({
+          ticketIds.push({
             ticketId,
             attendee
-        });
-    }
-  });
+          })
+        }
+      })
       // 3. Dispatch the ticket via Brevo immediately (Non-blocking worker thread)
       setImmediate(async () => {
         for (const { ticketId, attendee } of ticketIds) {
           try {
-            const ticketSnap = await db.collection("tickets").doc(ticketId).get();
+            const ticketSnap = await db
+              .collection('tickets')
+              .doc(ticketId)
+              .get()
 
-            if (!ticketSnap.exists) continue;
+            if (!ticketSnap.exists) continue
 
-            const ticket = ticketSnap.data();
+            const ticket = ticketSnap.data()
 
-            const emailPayload = new Brevo.SendSmtpEmail();
+            const emailPayload = new Brevo.SendSmtpEmail()
 
-            emailPayload.subject = `🧩 Congratulations, You're ${event.name} certified `;
+            emailPayload.subject = `🧩 Congratulations, You're ${event.name} certified `
 
             emailPayload.sender = {
-              name: "Airticks Events",
-              email: process.env.EMAIL_FROM,
-            };
+              name: 'Airticks Events',
+              email: process.env.EMAIL_FROM
+            }
 
             emailPayload.to = [
               {
                 email: ticket.email,
-                name: ticket.buyerName,
-              },
-            ];
+                name: ticket.buyerName
+              }
+            ]
 
             emailPayload.attachment = [
               {
-                name: "ticket-qr.png",
-                content: ticket.qr,
-              },
-            ];
+                name: 'ticket-qr.png',
+                content: ticket.qr
+              }
+            ]
 
             const intro = ticket.isBuyer
               ? `
@@ -627,7 +651,7 @@ const {
                   <p>Ticket Number: ${ticket.attendeeNumber} </p>
                   
                   <p>This QR code belongs only to you.</p>
-                `;
+                `
 
             emailPayload.htmlContent = `
             <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;border:1px solid #eee;border-radius:12px;">
@@ -678,17 +702,16 @@ const {
               </p>
 
             </div>
-            `;
+            `
 
-            await emailApi.sendTransacEmail(emailPayload);
+            await emailApi.sendTransacEmail(emailPayload)
 
-            console.log("✅ Free ticket email sent:", ticket.email);
-
+            console.log('✅ Free ticket email sent:', ticket.email)
           } catch (err) {
-            console.error("❌ Free ticket email error:", attendee.email, err);
+            console.error('❌ Free ticket email error:', attendee.email, err)
           }
-          }
-        });
+        }
+      })
 
       // 4. Return success to the frontend instantly so it knows there's no redirect URL needed
       return res.json({
@@ -703,12 +726,18 @@ const {
        💳 PAID TICKETS WORKFLOW (PAYSTACK ROUTING CONTINUES BELOW)
     ============================================================ */
     if (!event.subaccountCode) {
-      return res.status(400).json({ error: 'Organizer payout routing parameters are unconfigured.' })
+      return res
+        .status(400)
+        .json({
+          error: 'Organizer payout routing parameters are unconfigured.'
+        })
     }
 
     const amountInKobo = Math.round(totalAmount * 100)
     if (amountInKobo < 100) {
-      return res.status(400).json({ error: 'Amount too low for Paystack channels processing.' })
+      return res
+        .status(400)
+        .json({ error: 'Amount too low for Paystack channels processing.' })
     }
 
     console.log('🧾 Processing Paid Ticket Checkout Routing:', ticketName)
@@ -736,7 +765,7 @@ const {
             platform: 'airticks',
             userId: userId || null,
             fullName: name,
-            attendees: attendeesList,// Pass attendee list if provided
+            attendees: attendeesList // Pass attendee list if provided
           }
         })
       }
@@ -756,7 +785,9 @@ const {
     })
   } catch (err) {
     console.error('INIT PAYMENT ERROR:', err)
-    return res.status(500).json({ error: 'Payment initialization sequence faulted.' })
+    return res
+      .status(500)
+      .json({ error: 'Payment initialization sequence faulted.' })
   }
 })
 
@@ -825,45 +856,42 @@ app.post('/api/webhook/paystack', async (req, res) => {
       ========================== */
       // If attendees were provided, use them. Otherwise, create single attendee from buyer
       const attendeesList =
-          Array.isArray(metadata.attendees) &&
-          metadata.attendees.length > 0
-              ? metadata.attendees
-              : [
-                  {
-                      name: metadata.fullName || customer.name || "Guest",
-                      email: customer.email,
-                      isBuyer: true,
-                  },
-              ];
+        Array.isArray(metadata.attendees) && metadata.attendees.length > 0
+          ? metadata.attendees
+          : [
+              {
+                name: metadata.fullName || customer.name || 'Guest',
+                email: customer.email,
+                isBuyer: true
+              }
+            ]
 
-        const emails = attendeesList.map(a =>
-              a.email.toLowerCase()
-          );
+      const emails = attendeesList.map(a => a.email.toLowerCase())
 
-          if (new Set(emails).size !== emails.length) {
-              return res.status(400).json({
-                  error: "Duplicate attendee emails are not allowed."
-              });
-          }
+      if (new Set(emails).size !== emails.length) {
+        return res.status(400).json({
+          error: 'Duplicate attendee emails are not allowed.'
+        })
+      }
 
       /* ============================================================
          ⚡ PERFORMANCE OPTIMIZATION: PRE-GENERATE TICKET IDS & QR CODES
          (Keeps the Firestore Transaction lightweight and deterministic)
       ============================================================ */
-      const preparedTickets = [];
-      const ticketIds = [];
+      const preparedTickets = []
+      const ticketIds = []
 
       for (const [index, attendee] of attendeesList.entries()) {
-        const ticketRef = db.collection('tickets').doc();
-        const ticketId = ticketRef.id;
+        const ticketRef = db.collection('tickets').doc()
+        const ticketId = ticketRef.id
 
-        const qrUrl = `${process.env.FRONTEND_URL}/ticket/${ticketId}`;
+        const qrUrl = `${process.env.FRONTEND_URL}/ticket/${ticketId}`
         const qrData = await QRCode.toDataURL(qrUrl, {
           width: 320,
           margin: 1,
-          errorCorrectionLevel: "M",
-        });
-        const qrBase64 = qrData.replace(/^data:image\/png;base64,/, '');
+          errorCorrectionLevel: 'M'
+        })
+        const qrBase64 = qrData.replace(/^data:image\/png;base64,/, '')
 
         preparedTickets.push({
           ticketRef,
@@ -871,62 +899,74 @@ app.post('/api/webhook/paystack', async (req, res) => {
           index,
           attendee,
           qrBase64
-        });
+        })
 
-        ticketIds.push({ ticketId, attendee });
+        ticketIds.push({ ticketId, attendee })
       }
 
       /* ============================================================
          💼 TRANSACTION WORKFLOW (WALLETS, COUNT, & DATA WRITE)
       ============================================================ */
       await db.runTransaction(async tx => {
-        const platformWalletRef = db.collection('wallets').doc('platform');
-        const organizerWalletRef = db.collection('wallets').doc(organizerId);
+        const platformWalletRef = db.collection('wallets').doc('platform')
+        const organizerWalletRef = db.collection('wallets').doc(organizerId)
 
-      const currentCount = eventDoc.attendeeCount || 0;
-
+        const currentCount = eventDoc.attendeeCount || 0
 
         // Update Wallet Metrics
-        tx.set(platformWalletRef, {
-          balance: admin.firestore.FieldValue.increment(platformFee),
-          totalRevenue: admin.firestore.FieldValue.increment(platformFee),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
+        tx.set(
+          platformWalletRef,
+          {
+            balance: admin.firestore.FieldValue.increment(platformFee),
+            totalRevenue: admin.firestore.FieldValue.increment(platformFee),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          { merge: true }
+        )
 
-        tx.set(organizerWalletRef, {
-          pendingBalance: admin.firestore.FieldValue.increment(organizerAmount),
-          totalEarnings: admin.firestore.FieldValue.increment(organizerAmount),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
+        tx.set(
+          organizerWalletRef,
+          {
+            pendingBalance:
+              admin.firestore.FieldValue.increment(organizerAmount),
+            totalEarnings:
+              admin.firestore.FieldValue.increment(organizerAmount),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          { merge: true }
+        )
 
         // Update Event Ticket metrics
-        tx.set(eventRef, {
-          ticketSold: admin.firestore.FieldValue.increment(ticketQty),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
+        tx.set(
+          eventRef,
+          {
+            ticketSold: admin.firestore.FieldValue.increment(ticketQty),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          { merge: true }
+        )
 
-        const ticketField = eventDoc.tickets ? "tickets" : "price";
+        const ticketField = eventDoc.tickets ? 'tickets' : 'price'
 
-        const ticketList = eventDoc[ticketField] || [];
+        const ticketList = eventDoc[ticketField] || []
 
         const updatedTickets = ticketList.map(t => {
-            if (t.id !== metadata.ticketId) return t;
+          if (t.id !== metadata.ticketId) return t
 
-            return {
-                ...t,
-                sold: (t.sold || 0) + ticketQty,
-            };
-        });
+          return {
+            ...t,
+            sold: (t.sold || 0) + ticketQty
+          }
+        })
 
         tx.update(eventRef, {
-            attendeeCount: currentCount + ticketQty,
-            [ticketField]: updatedTickets,
-        });
+          attendeeCount: currentCount + ticketQty,
+          [ticketField]: updatedTickets
+        })
 
         // Write batch tickets
         for (const item of preparedTickets) {
-
-          const attendeeNumber = currentCount + item.index + 1;
+          const attendeeNumber = currentCount + item.index + 1
 
           tx.set(item.ticketRef, {
             ticketId: item.ticketId,
@@ -940,11 +980,11 @@ app.post('/api/webhook/paystack', async (req, res) => {
             eventId: metadata.eventId,
             eventName: eventDoc.name,
             ticketType: metadata.ticketName,
-            ticketQuantity:ticketQty,
-            totalTickets:attendeesList.length,
-            location: eventDoc.venue.name || "TBA",
+            ticketQuantity: ticketQty,
+            totalTickets: attendeesList.length,
+            location: eventDoc.venue.name || 'TBA',
             map: eventDoc.venue.map,
-            currency:metadata.ticketCurrency,
+            currency: metadata.ticketCurrency,
 
             amount: Number(metadata.ticketPrice || 0),
 
@@ -956,20 +996,20 @@ app.post('/api/webhook/paystack', async (req, res) => {
             attendeeEmail: item.attendee.email.toLowerCase(),
             attendeeNumber,
 
-            purchaserName: metadata.fullName || customer.name || "Guest",
+            purchaserName: metadata.fullName || customer.name || 'Guest',
             purchaserEmail: customer.email.toLowerCase(),
 
             isBuyer: item.attendee.isBuyer || false,
             organizer: eventDoc.organizer,
 
             qr: item.qrBase64,
-            status: "success",
+            status: 'success',
             used: false,
 
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          })
         }
-      });
+      })
 
       /* =========================
          WALLET LEDGER
@@ -989,7 +1029,9 @@ app.post('/api/webhook/paystack', async (req, res) => {
       await db.collection('notifications').add({
         type: 'ticket_purchase',
         title: '🎫 New Tickets Sold',
-        message: `${metadata.fullName || 'Someone'} bought ${ticketQty} ticket(s) for ${eventDoc.name}`,
+        message: `${
+          metadata.fullName || 'Someone'
+        } bought ${ticketQty} ticket(s) for ${eventDoc.name}`,
         userId: organizerId,
         actorId: customer.email,
         eventId: metadata.eventId,
@@ -1004,47 +1046,54 @@ app.post('/api/webhook/paystack', async (req, res) => {
       setImmediate(async () => {
         for (const { ticketId, attendee } of ticketIds) {
           try {
-            const ticketSnap = await db.collection("tickets").doc(ticketId).get();
-            if (!ticketSnap.exists) continue;
+            const ticketSnap = await db
+              .collection('tickets')
+              .doc(ticketId)
+              .get()
+            if (!ticketSnap.exists) continue
 
-            const ticket = ticketSnap.data();
+            const ticket = ticketSnap.data()
 
-            const emailPayload = new Brevo.SendSmtpEmail();
-            emailPayload.subject = `🦅 Congratulations, You're ${eventDoc.name} certified!`;
+            const emailPayload = new Brevo.SendSmtpEmail()
+            emailPayload.subject = `🦅 Congratulations, You're ${eventDoc.name} certified!`
             emailPayload.sender = {
-              name: "Airticks Events",
-              email: process.env.EMAIL_FROM,
-            };
+              name: 'Airticks Events',
+              email: process.env.EMAIL_FROM
+            }
 
             emailPayload.to = [
               {
                 email: ticket.email,
-                name: ticket.buyerName,
-              },
-            ];
+                name: ticket.buyerName
+              }
+            ]
 
             emailPayload.attachment = [
               {
-                name: "ticket-qr.png",
-                content: ticket.qr,
-              },
-            ];
+                name: 'ticket-qr.png',
+                content: ticket.qr
+              }
+            ]
 
             const intro = ticket.isBuyer
               ? `
-                <p>Thank you for purchasing your ticket${ticketQty > 1 ? "s" : ""} for <b>${eventDoc.name}</b>.</p>
+                <p>Thank you for purchasing your ticket${
+                  ticketQty > 1 ? 's' : ''
+                } for <b>${eventDoc.name}</b>.</p>
                 <p>Your personal ticket is attached below.</p>
                 <p>Ticket No: ${ticket.attendeeNumber}</p>
               `
               : `
                 <p><strong>${metadata.fullName}</strong> has purchased this ticket for you to attend <b>${eventDoc.name}</b>.</p>
                 <p>This ticket is registered in your name and the QR code below is for your entry only.</p>
-              `;
+              `
 
             emailPayload.htmlContent = `
               <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;border:1px solid #eee;border-radius:12px;">
 
-                <h2 style="text-align:center;">🦅 Your ticket to the ${eventDoc.name} Experience is ready!</h2>
+                <h2 style="text-align:center;">🦅 Your ticket to the ${
+                  eventDoc.name
+                } Experience is ready!</h2>
 
                 <p>Hello <strong>${ticket.buyerName}</strong>,</p>
 
@@ -1072,7 +1121,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
                         <td>${metadata.fullName}</td>
                       </tr>
                     `
-                      : ""
+                      : ''
                   }
 
                   <tr>
@@ -1106,22 +1155,24 @@ app.post('/api/webhook/paystack', async (req, res) => {
                 </p>
 
               </div>
-            `;
+            `
 
-            await emailApi.sendTransacEmail(emailPayload);
+            await emailApi.sendTransacEmail(emailPayload)
 
-            console.log(`📧 Ticket email sent to ${ticket.email}`);
+            console.log(`📧 Ticket email sent to ${ticket.email}`)
           } catch (emailErr) {
             console.error(
-              "❌ Error sending ticket email to",
+              '❌ Error sending ticket email to',
               attendee.email,
               emailErr
-            );
+            )
           }
         }
-      });
+      })
 
-      console.log(`✅ Created ${attendeesList.length} individual ticket(s) with QR codes`)
+      console.log(
+        `✅ Created ${attendeesList.length} individual ticket(s) with QR codes`
+      )
     }
 
     return res.sendStatus(200)
@@ -1131,61 +1182,56 @@ app.post('/api/webhook/paystack', async (req, res) => {
   }
 })
 
-
-
-app.post("/api/tickets/verify", async (req, res) => {
+app.post('/api/tickets/verify', async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
+    const authHeader = req.headers.authorization
 
-    if (!authHeader?.startsWith("Bearer ")) {
+    if (!authHeader?.startsWith('Bearer ')) {
       return res.status(401).json({
-        error: "Unauthorized",
-      });
+        error: 'Unauthorized'
+      })
     }
 
-    const token = authHeader.split(" ")[1];
+    const token = authHeader.split(' ')[1]
 
-    const decoded = await admin.auth().verifyIdToken(token);
+    const decoded = await admin.auth().verifyIdToken(token)
 
-    const scannerDoc = await db
-      .collection("users")
-      .doc(decoded.uid)
-      .get();
+    const scannerDoc = await db.collection('users').doc(decoded.uid).get()
 
     if (!scannerDoc.exists) {
       return res.status(404).json({
-        error: "User not found",
-      });
+        error: 'User not found'
+      })
     }
 
-    const scanner = scannerDoc.data();
+    const scanner = scannerDoc.data()
 
-    if (!scanner.isAdmin && scanner.accountType !== "organization") {
+    if (!scanner.isAdmin && scanner.accountType !== 'organization') {
       return res.status(403).json({
-        error: "Only organizers and admins can verify tickets.",
-      });
+        error: 'Only organizers and admins can verify tickets.'
+      })
     }
 
-    const { ticketId } = req.body;
+    const { ticketId } = req.body
 
-    const ticketRef = db.collection("tickets").doc(ticketId);
+    const ticketRef = db.collection('tickets').doc(ticketId)
 
-    const ticketDoc = await ticketRef.get();
+    const ticketDoc = await ticketRef.get()
 
     if (!ticketDoc.exists) {
       return res.status(404).json({
-        error: "Ticket not found.",
-      });
+        error: 'Ticket not found.'
+      })
     }
 
-    const ticket = ticketDoc.data();
+    const ticket = ticketDoc.data()
 
     if (ticket.used) {
       return res.status(409).json({
-        error: "Ticket already used.",
+        error: 'Ticket already used.',
         buyerName: ticket.buyerName,
-        eventName: ticket.eventName,
-      });
+        eventName: ticket.eventName
+      })
     }
 
     await ticketRef.update({
@@ -1193,11 +1239,8 @@ app.post("/api/tickets/verify", async (req, res) => {
       scannedAt: admin.firestore.FieldValue.serverTimestamp(),
       scannedBy: decoded.uid,
       scannedByName:
-        scanner.fullName ||
-        scanner.displayName ||
-        scanner.name ||
-        "Admin",
-    });
+        scanner.fullName || scanner.displayName || scanner.name || 'Admin'
+    })
 
     res.json({
       success: true,
@@ -1207,34 +1250,30 @@ app.post("/api/tickets/verify", async (req, res) => {
       ticketType: ticket.ticketType,
       ticketNumber: ticket.ticketNumber,
       used: ticket.used,
-      scannedByName: ticket.scannedByName || null,
-    });
-
+      scannedByName: ticket.scannedByName || null
+    })
   } catch (err) {
-    console.error(err);
+    console.error(err)
 
     res.status(500).json({
-      error: "Verification failed.",
-    });
+      error: 'Verification failed.'
+    })
   }
-});
+})
 
-app.get("/api/tickets/:ticketId", async (req, res) => {
+app.get('/api/tickets/:ticketId', async (req, res) => {
   try {
-    const { ticketId } = req.params;
+    const { ticketId } = req.params
 
-    const ticketDoc = await db
-      .collection("tickets")
-      .doc(ticketId)
-      .get();
+    const ticketDoc = await db.collection('tickets').doc(ticketId).get()
 
     if (!ticketDoc.exists) {
       return res.status(404).json({
-        error: "Ticket not found.",
-      });
+        error: 'Ticket not found.'
+      })
     }
 
-    const ticket = ticketDoc.data();
+    const ticket = ticketDoc.data()
 
     res.json({
       attendeeName: ticket.attendeeName,
@@ -1244,19 +1283,16 @@ app.get("/api/tickets/:ticketId", async (req, res) => {
       ticketNumber: ticket.ticketNumber,
       used: ticket.used,
       scannedByName: ticket.scannedByName || null,
-      scannedAt: ticket.scannedAt
-        ? ticket.scannedAt.toDate()
-        : null,
-    });
-
+      scannedAt: ticket.scannedAt ? ticket.scannedAt.toDate() : null
+    })
   } catch (err) {
-    console.error(err);
+    console.error(err)
 
     res.status(500).json({
-      error: "Server error.",
-    });
+      error: 'Server error.'
+    })
   }
-});
+})
 
 /* ============================================================
    FETCH PAYSTACK SETTLEMENTS (BANK PAID STATUS)
