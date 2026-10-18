@@ -1330,6 +1330,554 @@ app.post('/api/webhook/paystack', async (req, res) => {
   }
 })
 
+
+/* =========================================
+   ADMIN PROMOTIONAL / GIVEAWAY TICKETS
+   Uses existing Firebase Admin, authenticate,
+   QRCode, db, and Brevo emailApi.
+========================================= */
+
+const escapePromoHtml = (value = "") =>
+  String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]);
+
+const sendPromoTicketEmail = async (ticketId, ticket, eventData) => {
+  if (!process.env.EMAIL_FROM) {
+    throw new Error("EMAIL_FROM is not configured.");
+  }
+
+  if (!process.env.BREVO_API_KEY) {
+    throw new Error("BREVO_API_KEY is not configured.");
+  }
+
+  if (!ticket.qr) {
+    throw new Error("Ticket QR code is missing.");
+  }
+
+  const recipientName = escapePromoHtml(ticket.buyerName);
+  const eventName = escapePromoHtml(ticket.eventName);
+  const ticketType = escapePromoHtml(ticket.ticketType);
+  const location = escapePromoHtml(eventData.venue.name || "To be announced");
+  const reason = escapePromoHtml(ticket.promoReason || "Promotional giveaway");
+
+  await emailApi.sendTransacEmail({
+    sender: {
+      name: "AirTicks",
+      email: process.env.EMAIL_FROM,
+    },
+
+    to: [
+      {
+        email: ticket.email,
+        name: ticket.buyerName,
+      },
+    ],
+
+    subject: `Your free giveaway ticket for ${ticket.eventName}`,
+
+    htmlContent: `
+      <!DOCTYPE html>
+      <html>
+        <body style="font-family:Arial,sans-serif;color:#171717;line-height:1.6">
+          <div style="max-width:600px;margin:auto;padding:24px">
+            <h1 style="color:#f97316">AirTicks</h1>
+
+            <h2>Congratulations, ${recipientName}!</h2>
+
+            <p>
+              You've received a complimentary ticket to
+              <strong>${eventName}</strong>.
+            </p>
+
+            <div style="padding:18px;background:#f5f5f5;border-radius:12px">
+              <p><strong>Attendee:</strong> ${recipientName}</p>
+              <p><strong>Event:</strong> ${eventName}</p>
+              <p><strong>Ticket type:</strong> ${ticketType}</p>
+              <p><strong>Location:</strong> ${location}</p>
+              <p><strong>Ticket ID:</strong> ${escapePromoHtml(ticketId)}</p>
+              <p><strong>Reason:</strong> ${reason}</p>
+              <p><strong>Amount paid:</strong> ₦0</p>
+            </div>
+
+            <h3>Your QR ticket</h3>
+            <p>
+              Your QR code is attached to this email as a PNG image.
+              Keep it safe and present it at the event entrance.
+            </p>
+
+            <p>
+              This is an official complimentary ticket issued by AirTicks.
+              No payment is required.
+            </p>
+
+            <p>Enjoy the event!<br />The AirTicks Team</p>
+          </div>
+        </body>
+      </html>
+    `,
+
+    attachment: [
+      {
+        name: `AirTicks-Giveaway-${ticketId}.png`,
+        content: ticket.qr,
+      },
+    ],
+  });
+};
+
+/* =========================================
+   ISSUE A PROMOTIONAL TICKET
+   POST /api/admin/promo-tickets
+========================================= */
+
+app.post(
+  "/api/admin/promo-tickets",
+  authenticate,
+  async (req, res) => {
+    if (req.user.isAdmin !== true) {
+      return res.status(403).json({
+        error: "Only AirTicks administrators can issue giveaway tickets.",
+      });
+    }
+
+    let ticketRef;
+
+    try {
+      const {
+        eventId,
+        attendeeName,
+        attendeeEmail,
+        promoReason = "Promotional giveaway",
+      } = req.body;
+
+      if (
+        typeof eventId !== "string" ||
+        !eventId.trim() ||
+        typeof attendeeName !== "string" ||
+        !attendeeName.trim() ||
+        typeof attendeeEmail !== "string" ||
+        !attendeeEmail.trim()
+      ) {
+        return res.status(400).json({
+          error: "Event, attendee name, and attendee email are required.",
+        });
+      }
+
+      const name = attendeeName.trim();
+      const email = attendeeEmail.trim().toLowerCase();
+
+      if (name.length > 120 || email.length > 254) {
+        return res.status(400).json({
+          error: "The attendee name or email is too long.",
+        });
+      }
+
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({
+          error: "Enter a valid attendee email address.",
+        });
+      }
+
+      if (
+        typeof promoReason !== "string" ||
+        promoReason.trim().length > 200
+      ) {
+        return res.status(400).json({
+          error: "The giveaway reason must be 200 characters or fewer.",
+        });
+      }
+
+      // Events are fetched by the backend, not trusted from the browser.
+      const eventRef = db.collection("events").doc(eventId.trim());
+      const eventSnap = await eventRef.get();
+
+      if (!eventSnap.exists) {
+        return res.status(404).json({
+          error: "The selected event was not found.",
+        });
+      }
+
+      const eventData = eventSnap.data();
+
+      // Create a unique ticket document ID first.
+      ticketRef = db.collection("tickets").doc();
+      const ticketId = ticketRef.id;
+
+      // The scanner receives the ticket document ID in the QR code.
+      const qrDataUrl = await QRCode.toDataURL(ticketId, {
+        width: 320,
+        margin: 1,
+        errorCorrectionLevel: "M",
+      });
+
+      const qrBase64 = qrDataUrl.replace(
+        /^data:image\/png;base64,/,
+        ""
+      );
+
+      const ticket = {
+        reference: `PROMO-${ticketId}`,
+        eventId: eventRef.id,
+        eventName: eventData.name || eventData.title || "Event",
+        organizerId: eventData.ownerId || null,
+
+        userId: null,
+        email,
+        buyerName: name,
+
+        ticketNumber: 1,
+        ticketType: "PROMO / GIVEAWAY",
+        location: eventData.location || "TBA",
+
+        amount: 0,
+        status: "success",
+        used: false,
+
+        qr: qrBase64,
+
+        ticketSource: "admin_promo",
+        promoReason: promoReason.trim() || "Promotional giveaway",
+        issuedBy: req.user.uid,
+        issuedByEmail: req.user.email || null,
+
+        emailStatus: "pending",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      // Save the actual ticket before sending the email.
+      // No payment, wallet or revenue transaction occurs here.
+      await ticketRef.set(ticket);
+
+      await eventRef.update({
+        attendeeCount: admin.firestore.FieldValue.increment(1),
+        ticketSold: admin.firestore.FieldValue.increment(1),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      try {
+        await sendPromoTicketEmail(ticketId, ticket, eventData);
+
+        await ticketRef.update({
+          emailStatus: "sent",
+          emailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        return res.status(201).json({
+          success: true,
+          ticketId,
+          emailSent: true,
+          message: "Giveaway ticket created and emailed successfully.",
+        });
+      } catch (emailError) {
+        console.error("Giveaway ticket email failed:", emailError);
+
+        // Keep the created ticket. Do not issue a duplicate if
+        // the email fails; allow the admin to resend it instead.
+        await ticketRef.update({
+          emailStatus: "failed",
+          emailErrorAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        return res.status(502).json({
+          success: false,
+          ticketCreated: true,
+          ticketId,
+          emailSent: false,
+          error: "Ticket created, but the email failed. Use Resend Email.",
+        });
+      }
+    } catch (error) {
+      console.error("Promo ticket creation failed:", error);
+
+      return res.status(500).json({
+        error: "Could not issue the giveaway ticket.",
+      });
+    }
+  }
+);
+
+/* =========================================
+   RESEND A GIVEAWAY TICKET EMAIL
+   POST /api/admin/promo-tickets/:ticketId/resend
+========================================= */
+
+app.post(
+  "/api/admin/promo-tickets/:ticketId/resend",
+  authenticate,
+  async (req, res) => {
+    if (req.user.isAdmin !== true) {
+      return res.status(403).json({
+        error: "Only AirTicks administrators can resend ticket emails.",
+      });
+    }
+
+    try {
+      const { ticketId } = req.params;
+
+      const ticketRef = db.collection("tickets").doc(ticketId);
+      const ticketSnap = await ticketRef.get();
+
+      if (!ticketSnap.exists) {
+        return res.status(404).json({
+          error: "Ticket not found.",
+        });
+      }
+
+      const ticket = ticketSnap.data();
+
+      if (ticket.ticketSource !== "admin_promo") {
+        return res.status(400).json({
+          error: "This is not an admin promotional ticket.",
+        });
+      }
+
+      const eventSnap = await db
+        .collection("events")
+        .doc(ticket.eventId)
+        .get();
+
+      if (!eventSnap.exists) {
+        return res.status(404).json({
+          error: "The event associated with this ticket no longer exists.",
+        });
+      }
+
+      await sendPromoTicketEmail(
+        ticketId,
+        ticket,
+        eventSnap.data()
+      );
+
+      await ticketRef.update({
+        emailStatus: "sent",
+        emailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      return res.json({
+        success: true,
+        ticketId,
+        emailSent: true,
+        message: "Giveaway ticket email resent successfully.",
+      });
+    } catch (error) {
+      console.error("Promo ticket resend failed:", error);
+
+      return res.status(500).json({
+        error: "Could not resend the ticket email.",
+      });
+    }
+  }
+);
+
+
+app.post(
+  "/api/organization/promo-tickets",
+  authenticate,
+  async (req, res) => {
+    try {
+      const {
+        eventId,
+        attendeeName,
+        attendeeEmail,
+        promoReason = "Promotional giveaway",
+      } = req.body;
+
+      if (
+        typeof eventId !== "string" ||
+        !eventId.trim() ||
+        typeof attendeeName !== "string" ||
+        !attendeeName.trim() ||
+        typeof attendeeEmail !== "string" ||
+        !attendeeEmail.trim()
+      ) {
+        return res.status(400).json({
+          error: "Event, attendee name, and attendee email are required.",
+        });
+      }
+
+      const eventRef = db.collection("events").doc(eventId.trim());
+      const eventSnap = await eventRef.get();
+
+      if (!eventSnap.exists) {
+        return res.status(404).json({
+          error: "The selected event was not found.",
+        });
+      }
+
+      const eventData = eventSnap.data();
+      const isOwner = eventData.ownerId === req.user.uid;
+      const isAdmin = req.user.isAdmin === true;
+
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({
+          error: "You can only gift tickets for your own events.",
+        });
+      }
+
+      const name = attendeeName.trim();
+      const email = attendeeEmail.trim().toLowerCase();
+
+      if (name.length > 120 || email.length > 254) {
+        return res.status(400).json({
+          error: "The attendee name or email is too long.",
+        });
+      }
+
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({
+          error: "Enter a valid attendee email address.",
+        });
+      }
+
+      if (typeof promoReason !== "string" || promoReason.trim().length > 200) {
+        return res.status(400).json({
+          error: "The giveaway reason must be 200 characters or fewer.",
+        });
+      }
+
+      const ticketRef = db.collection("tickets").doc();
+      const ticketId = ticketRef.id;
+      const qrDataUrl = await QRCode.toDataURL(ticketId, {
+        width: 320,
+        margin: 1,
+        errorCorrectionLevel: "M",
+      });
+      const qrBase64 = qrDataUrl.replace(/^data:image\/png;base64,/, "");
+
+      const ticket = {
+        reference: `PROMO-${ticketId}`,
+        eventId: eventRef.id,
+        eventName: eventData.name || eventData.title || "Event",
+        organizerId: eventData.ownerId || null,
+        userId: null,
+        email,
+        buyerName: name,
+        ticketNumber: 1,
+        ticketType: "PROMO / GIVEAWAY",
+        location: eventData.location || "TBA",
+        amount: 0,
+        status: "success",
+        used: false,
+        qr: qrBase64,
+        ticketSource: "organizer_promo",
+        promoReason: promoReason.trim() || "Promotional giveaway",
+        issuedBy: req.user.uid,
+        issuedByEmail: req.user.email || null,
+        emailStatus: "pending",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      await ticketRef.set(ticket);
+
+      await eventRef.update({
+        attendeeCount: admin.firestore.FieldValue.increment(1),
+        ticketSold: admin.firestore.FieldValue.increment(1),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      try {
+        await sendPromoTicketEmail(ticketId, ticket, eventData);
+        await ticketRef.update({
+          emailStatus: "sent",
+          emailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        return res.status(201).json({
+          success: true,
+          ticketId,
+          emailSent: true,
+          message: "Giveaway ticket created and emailed successfully.",
+        });
+      } catch (emailError) {
+        console.error("Organizer promo ticket email failed:", emailError);
+
+        await ticketRef.update({
+          emailStatus: "failed",
+          emailErrorAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        return res.status(502).json({
+          success: false,
+          ticketCreated: true,
+          ticketId,
+          emailSent: false,
+          error: "Ticket created, but the email failed. Use resend email if available.",
+        });
+      }
+    } catch (error) {
+      console.error("Organizer promo ticket creation failed:", error);
+      return res.status(500).json({
+        error: "Could not issue the giveaway ticket.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/organization/promo-tickets/:ticketId/resend",
+  authenticate,
+  async (req, res) => {
+    try {
+      const { ticketId } = req.params;
+      const ticketRef = db.collection("tickets").doc(ticketId);
+      const ticketSnap = await ticketRef.get();
+
+      if (!ticketSnap.exists) {
+        return res.status(404).json({ error: "Ticket not found." });
+      }
+
+      const ticket = ticketSnap.data();
+
+      if (ticket.ticketSource !== "organizer_promo") {
+        return res.status(400).json({
+          error: "This is not an organizer promotional ticket.",
+        });
+      }
+
+      const eventSnap = await db.collection("events").doc(ticket.eventId).get();
+
+      if (!eventSnap.exists) {
+        return res.status(404).json({
+          error: "The event associated with this ticket no longer exists.",
+        });
+      }
+
+      const eventData = eventSnap.data();
+      const isOwner = eventData.ownerId === req.user.uid;
+      const isAdmin = req.user.isAdmin === true;
+
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({
+          error: "You can only resend emails for your own event tickets.",
+        });
+      }
+
+      await sendPromoTicketEmail(ticketId, ticket, eventData);
+      await ticketRef.update({
+        emailStatus: "sent",
+        emailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      return res.json({
+        success: true,
+        ticketId,
+        emailSent: true,
+        message: "Giveaway ticket email resent successfully.",
+      });
+    } catch (error) {
+      console.error("Organizer promo ticket resend failed:", error);
+      return res.status(500).json({
+        error: "Could not resend the ticket email.",
+      });
+    }
+  }
+    );
+
 app.post('/api/tickets/verify', async (req, res) => {
   try {
     const authHeader = req.headers.authorization
