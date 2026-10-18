@@ -428,56 +428,27 @@ app.post('/api/init-payment', async (req, res) => {
       email,
       eventId,
       ticketId,
-      ticketName,
-      ticketType,
       ticketCurrency,
       ticketQuantity,
-      ticketPrice,
       userId,
-      attendees = []
+      attendees = [],
+      ticketItems = []
     } = req.body
 
     if (
-      !email ||
-      !eventId ||
-      !ticketId ||
-      !ticketName ||
-      !ticketType ||
-      !ticketCurrency ||
-      ticketPrice === undefined
+      typeof email !== 'string' ||
+      !email.trim() ||
+      typeof eventId !== 'string' ||
+      !eventId
     ) {
       return res.status(400).json({ error: 'Missing required fields' })
     }
 
-    const qty = Number(ticketQuantity)
-    if (!Number.isInteger(qty) || qty <= 0) {
+    const requestedQuantity = Number(ticketQuantity)
+    if (!Number.isInteger(requestedQuantity) || requestedQuantity <= 0) {
       return res.status(400).json({ error: 'Invalid ticket quantity' })
     }
 
-    const attendeesList =
-      Array.isArray(attendees) && attendees.length > 0
-        ? attendees
-        : [
-            {
-              name: name || 'Guest',
-              email: email.toLowerCase(),
-              isBuyer: true
-            }
-          ]
-
-    const emails = attendeesList.map(a => a.email.toLowerCase())
-
-    if (new Set(emails).size !== emails.length) {
-      return res.status(400).json({
-        error: 'Duplicate attendee emails are not allowed.'
-      })
-    }
-
-    if (attendeesList.length !== qty) {
-      return res.status(400).json({
-        error: 'Attendee count does not match ticket quantity.'
-      })
-    }
     /* ===============================
        2. FETCH EVENT
     =============================== */
@@ -498,21 +469,163 @@ app.post('/api/init-payment', async (req, res) => {
       ? event.price
       : []
 
-    const ticket = ticketList.find(t => t.id === ticketId)
+    const hasTicketItems = Array.isArray(ticketItems) && ticketItems.length > 0
+    const requestedItems = hasTicketItems
+      ? ticketItems
+      : [{ ticketId, quantity: requestedQuantity, attendees }]
+    const normalizedItems = []
 
-    if (!ticket) {
-      return res.status(400).json({
-        error: 'Ticket type not found'
+    for (const item of requestedItems) {
+      if (!item || typeof item !== 'object') {
+        return res.status(400).json({ error: 'Invalid ticket item' })
+      }
+
+      const itemQuantity = Number(item.quantity ?? item.ticketQuantity)
+      if (!item.ticketId || !Number.isInteger(itemQuantity) || itemQuantity <= 0) {
+        return res.status(400).json({ error: 'Invalid ticket item' })
+      }
+
+      const ticket = ticketList.find(t => t.id === item.ticketId)
+      if (!ticket) {
+        return res.status(400).json({ error: 'Ticket type not found' })
+      }
+
+      const price = Number(ticket.price ?? 0)
+      if (!Number.isFinite(price) || price < 0) {
+        return res.status(400).json({ error: 'Invalid ticket price configuration' })
+      }
+
+      if (itemQuantity > 10) {
+        return res.status(400).json({
+          error: `Maximum 10 ${ticket.name} ticket(s) per purchase.`
+        })
+      }
+
+      const remaining = ticket.quantity == null
+        ? Infinity
+        : Number(ticket.quantity) - Number(ticket.sold || 0)
+      if (
+        !Number.isFinite(remaining) &&
+        ticket.quantity != null
+      ) {
+        return res.status(400).json({
+          error: `Invalid inventory configuration for ${ticket.name}.`
+        })
+      }
+      if (remaining <= 0 || itemQuantity > remaining) {
+        return res.status(400).json({
+          error: remaining <= 0
+            ? `${ticket.name} is sold out.`
+            : `Only ${remaining} ${ticket.name} ticket(s) remaining.`
+        })
+      }
+
+      if (new Set(normalizedItems.map(item => item.ticketId)).size !== normalizedItems.length) {
+        return res.status(400).json({ error: 'Duplicate ticket types are not allowed.' })
+      }
+
+      normalizedItems.push({
+        ticket,
+        ticketId: ticket.id,
+        ticketName: ticket.name,
+        ticketType: ticket.type || (price === 0 ? 'free' : 'paid'),
+        ticketCurrency: ticket.currency || ticketCurrency || 'NGN',
+        ticketPrice: price,
+        quantity: itemQuantity,
+        attendees: Array.isArray(item.attendees)
+          ? item.attendees
+          : hasTicketItems
+            ? []
+            : Array.isArray(attendees)
+              ? attendees
+              : []
       })
     }
 
-    if (isNaN(ticketPrice) || ticketPrice < 0) {
-      return res
-        .status(400)
-        .json({ error: 'Invalid ticket price configuration' })
+    const qty = normalizedItems.reduce((total, item) => total + item.quantity, 0)
+    if (qty !== requestedQuantity) {
+      return res.status(400).json({
+        error: 'Ticket item quantities do not match the requested quantity.'
+      })
     }
 
-    const totalAmount = ticketPrice * qty
+    const currencies = [...new Set(normalizedItems.map(item => item.ticketCurrency))]
+    if (currencies.length > 1) {
+      return res.status(400).json({
+        error: 'Tickets with different currencies must be purchased separately.'
+      })
+    }
+
+    const attendeesList = normalizedItems.flatMap(item =>
+      item.attendees.map(attendee => ({
+        ...attendee,
+        ticketId: item.ticketId,
+        ticketName: item.ticketName,
+        ticketType: item.ticketType,
+        ticketCurrency: item.ticketCurrency,
+        ticketPrice: item.ticketPrice,
+        maxPerPerson: item.ticket.maxPerPerson
+      }))
+    )
+
+    if (!hasTicketItems && attendeesList.length === 0 && qty === 1) {
+      const item = normalizedItems[0]
+      attendeesList.push({
+        name: name || 'Guest',
+        email: email.toLowerCase(),
+        isBuyer: true,
+        ticketId: item.ticketId,
+        ticketName: item.ticketName,
+        ticketType: item.ticketType,
+        ticketCurrency: item.ticketCurrency,
+        ticketPrice: item.ticketPrice,
+        maxPerPerson: item.ticket.maxPerPerson
+      })
+    }
+
+    if (attendeesList.length !== qty) {
+      return res.status(400).json({
+        error: 'Attendee count does not match ticket quantity.'
+      })
+    }
+
+    const validAttendees = attendeesList.every(
+      attendee =>
+        typeof attendee?.name === 'string' &&
+        attendee.name.trim() &&
+        typeof attendee?.email === 'string' &&
+        attendee.email.trim() &&
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(attendee.email.trim())
+    )
+    if (!validAttendees) {
+      return res.status(400).json({
+        error: 'A valid name and email are required for every attendee.'
+      })
+    }
+
+    const emails = attendeesList.map(a => a.email.trim().toLowerCase())
+    if (new Set(emails).size !== emails.length) {
+      return res.status(400).json({
+        error: 'Duplicate attendee emails are not allowed.'
+      })
+    }
+
+    const totalAmount = event.isFree === true
+      ? 0
+      : normalizedItems.reduce(
+          (total, item) => total + item.ticketPrice * item.quantity,
+          0
+        )
+    if (
+      event.isFree !== true &&
+      normalizedItems.some(item => item.ticketPrice === 0) &&
+      normalizedItems.some(item => item.ticketPrice > 0)
+    ) {
+      return res.status(400).json({
+        error: 'Free and paid tickets must be purchased separately.'
+      })
+    }
+    const primaryItem = normalizedItems[0]
 
     /* ============================================================
        ⚡ SHORT-CIRCUIT ROUTE FOR FREE TICKETS (0 NAIRA / 0 DOLLARS)
@@ -526,13 +639,17 @@ app.post('/api/init-payment', async (req, res) => {
       const ticketIds = []
 
       const ticketField = Array.isArray(event.tickets) ? 'tickets' : 'price'
+      const itemQuantities = new Map(
+        normalizedItems.map(item => [item.ticketId, item.quantity])
+      )
 
       const updatedTickets = ticketList.map(t => {
-        if (t.id !== ticketId) return t
+        const itemQuantity = itemQuantities.get(t.id)
+        if (!itemQuantity) return t
 
         return {
           ...t,
-          sold: (t.sold || 0) + qty
+          sold: (t.sold || 0) + itemQuantity
         }
       })
       await db.runTransaction(async tx => {
@@ -573,24 +690,26 @@ app.post('/api/init-payment', async (req, res) => {
             userId: userId || null,
             eventId,
             eventName: event.name,
-            ticketType: ticketName,
-            currency: ticket.currency,
+            ticketType: attendee.ticketName,
+            currency: attendee.ticketCurrency,
             location: event.venue.name || 'TBA',
             map: event.venue.map,
-            amount: 0,
-            buyerName: attendee.name,
-            email: attendee.email.toLowerCase(),
+            amount: event.isFree === true ? 0 : attendee.ticketPrice,
+            buyerName: attendee.name.trim(),
+            email: attendee.email.trim().toLowerCase(),
 
-            attendeeName: attendee.name,
-            attendeeEmail: attendee.email.toLowerCase(),
+            attendeeName: attendee.name.trim(),
+            attendeeEmail: attendee.email.trim().toLowerCase(),
             attendeeNumber,
 
             purchaserName: name,
             purchaserEmail: email.toLowerCase(),
-            totalTickets: attendeesList.length,
-            ticketQuantity: qty,
-            maxPerPerson: ticket.maxPerPerson,
-            isBuyer: attendee.isBuyer,
+            totalTickets: qty,
+            ticketQuantity: normalizedItems.find(
+              item => item.ticketId === attendee.ticketId
+            ).quantity,
+            maxPerPerson: attendee.maxPerPerson,
+            isBuyer: attendee.isBuyer === true,
             qr: qrBase64,
             status: 'success',
             used: false,
@@ -740,7 +859,7 @@ app.post('/api/init-payment', async (req, res) => {
         .json({ error: 'Amount too low for Paystack channels processing.' })
     }
 
-    console.log('🧾 Processing Paid Ticket Checkout Routing:', ticketName)
+    console.log('🧾 Processing Paid Ticket Checkout Routing:', primaryItem.ticketName)
 
     const paystackRes = await fetch(
       'https://api.paystack.co/transaction/initialize',
@@ -757,15 +876,15 @@ app.post('/api/init-payment', async (req, res) => {
           callback_url: `${process.env.FRONTEND_URL}/payment-success`,
           metadata: {
             eventId,
-            ticketId,
-            ticketName,
-            ticketPrice,
-            ticketCurrency,
+            ticketId: primaryItem.ticketId,
+            ticketName: primaryItem.ticketName,
+            ticketPrice: primaryItem.ticketPrice,
+            ticketCurrency: primaryItem.ticketCurrency,
             ticketNumber: qty,
             platform: 'airticks',
             userId: userId || null,
             fullName: name,
-            attendees: attendeesList // Pass attendee list if provided
+            attendees: attendeesList
           }
         })
       }
@@ -855,7 +974,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
          DETERMINE ATTENDEES LIST
       ========================== */
       // If attendees were provided, use them. Otherwise, create single attendee from buyer
-      const attendeesList =
+      const rawAttendees =
         Array.isArray(metadata.attendees) && metadata.attendees.length > 0
           ? metadata.attendees
           : [
@@ -865,6 +984,36 @@ app.post('/api/webhook/paystack', async (req, res) => {
                 isBuyer: true
               }
             ]
+
+      const attendeesList = rawAttendees.map(attendee => ({
+        ...attendee,
+        ticketId: attendee.ticketId || metadata.ticketId,
+        ticketName: attendee.ticketName || metadata.ticketName,
+        ticketType: attendee.ticketType || metadata.ticketType,
+        ticketCurrency: attendee.ticketCurrency || metadata.ticketCurrency,
+        ticketPrice: attendee.ticketPrice ?? metadata.ticketPrice
+      }))
+
+      if (attendeesList.length !== ticketQty) {
+        console.error('❌ Ticket quantity does not match attendee metadata')
+        return res.sendStatus(200)
+      }
+
+      const ticketCounts = attendeesList.reduce((counts, attendee) => {
+        counts.set(attendee.ticketId, (counts.get(attendee.ticketId) || 0) + 1)
+        return counts
+      }, new Map())
+
+      const ticketList = Array.isArray(eventDoc.tickets)
+        ? eventDoc.tickets
+        : Array.isArray(eventDoc.price)
+          ? eventDoc.price
+          : []
+      const knownTicketIds = new Set(ticketList.map(item => item.id))
+      if ([...ticketCounts.keys()].some(id => !knownTicketIds.has(id))) {
+        console.error('❌ Unknown ticket type in payment metadata')
+        return res.sendStatus(200)
+      }
 
       const emails = attendeesList.map(a => a.email.toLowerCase())
 
@@ -946,16 +1095,15 @@ app.post('/api/webhook/paystack', async (req, res) => {
           { merge: true }
         )
 
-        const ticketField = eventDoc.tickets ? 'tickets' : 'price'
+        const ticketField = Array.isArray(eventDoc.tickets) ? 'tickets' : 'price'
 
-        const ticketList = eventDoc[ticketField] || []
-
-        const updatedTickets = ticketList.map(t => {
-          if (t.id !== metadata.ticketId) return t
+        const updatedTickets = (eventDoc[ticketField] || []).map(t => {
+          const itemQuantity = ticketCounts.get(t.id)
+          if (!itemQuantity) return t
 
           return {
             ...t,
-            sold: (t.sold || 0) + ticketQty
+            sold: (t.sold || 0) + itemQuantity
           }
         })
 
@@ -979,27 +1127,27 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
             eventId: metadata.eventId,
             eventName: eventDoc.name,
-            ticketType: metadata.ticketName,
-            ticketQuantity: ticketQty,
+            ticketType: item.attendee.ticketName,
+            ticketQuantity: ticketCounts.get(item.attendee.ticketId),
             totalTickets: attendeesList.length,
             location: eventDoc.venue.name || 'TBA',
             map: eventDoc.venue.map,
-            currency: metadata.ticketCurrency,
+            currency: item.attendee.ticketCurrency,
 
-            amount: Number(metadata.ticketPrice || 0),
+            amount: Number(item.attendee.ticketPrice || 0),
 
             // Unified field naming matching frontend lookups & verification schemas
-            buyerName: item.attendee.name,
-            email: item.attendee.email.toLowerCase(),
+            buyerName: item.attendee.name.trim(),
+            email: item.attendee.email.trim().toLowerCase(),
 
-            attendeeName: item.attendee.name,
-            attendeeEmail: item.attendee.email.toLowerCase(),
+            attendeeName: item.attendee.name.trim(),
+            attendeeEmail: item.attendee.email.trim().toLowerCase(),
             attendeeNumber,
 
             purchaserName: metadata.fullName || customer.name || 'Guest',
             purchaserEmail: customer.email.toLowerCase(),
 
-            isBuyer: item.attendee.isBuyer || false,
+            isBuyer: item.attendee.isBuyer === true,
             organizer: eventDoc.organizer,
 
             qr: item.qrBase64,
